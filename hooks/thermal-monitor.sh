@@ -1,7 +1,6 @@
 #!/bin/bash
 
 # Monitor thermal state and re-enable sleep if Mac gets too hot
-# Forces sleep regardless of how many Claude instances are running
 
 PIDFILE="/tmp/thermal_monitor.pid"
 COUNTER_FILE="/tmp/claude_active_count"
@@ -21,13 +20,7 @@ while true; do
     if echo "$thermal_output" | grep -qE "(thermal warning level|performance warning level)" | grep -v "No "; then
         echo "$(date): Thermal warning detected, forcing sleep"
 
-        # Kill caffeinate
-        if [ -f /tmp/claude_caffeinate.pid ]; then
-            kill $(cat /tmp/claude_caffeinate.pid) 2>/dev/null
-            rm /tmp/claude_caffeinate.pid
-        fi
-
-        # Reset counter (all instances will need to re-trigger on next prompt)
+        # Reset counter
         rm -f "$COUNTER_FILE"
 
         # Re-enable sleep

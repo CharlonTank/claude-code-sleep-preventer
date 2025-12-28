@@ -20,11 +20,7 @@ echo "$count" > "$COUNTER_FILE"
 
 # If first Claude instance, set up sleep prevention
 if [ "$count" -eq 1 ]; then
-    # Start caffeinate (2 hour timeout)
-    nohup caffeinate -s -t 7200 > /dev/null 2>&1 &
-    echo $! > /tmp/claude_caffeinate.pid
-
-    # Disable sleep completely
+    # Disable sleep completely (works with lid closed, on battery)
     sudo pmset -a disablesleep 1
 
     # Start thermal monitor

@@ -20,12 +20,6 @@ echo "$count" > "$COUNTER_FILE"
 
 # If no more Claude instances, re-enable sleep
 if [ "$count" -eq 0 ]; then
-    # Kill caffeinate
-    if [ -f /tmp/claude_caffeinate.pid ]; then
-        kill $(cat /tmp/claude_caffeinate.pid) 2>/dev/null
-        rm /tmp/claude_caffeinate.pid
-    fi
-
     # Kill thermal monitor
     if [ -f /tmp/thermal_monitor.pid ]; then
         kill $(cat /tmp/thermal_monitor.pid) 2>/dev/null

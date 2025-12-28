@@ -18,7 +18,7 @@ Keep your Mac awake while Claude Code is working, even with the lid closed.
 ## Installation
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/claude-code-sleep-preventer.git
+git clone https://github.com/CharlonTank/claude-code-sleep-preventer.git
 cd claude-code-sleep-preventer
 ./install.sh
 ```
@@ -39,12 +39,19 @@ The installer will:
 
 ## How It Works
 
+Uses `pmset -a disablesleep` to control Mac sleep state via Claude Code hooks:
+
+- **UserPromptSubmit hook**: Runs `prevent-sleep.sh` → disables sleep
+- **Stop hook**: Runs `allow-sleep.sh` → re-enables sleep
+
+A thermal monitor runs in the background and forces sleep if the Mac overheats.
+
 | Event | Action |
 |-------|--------|
-| Claude starts working | Mac stays awake |
-| Claude stops | Normal sleep resumes |
-| Mac overheats | Forces sleep for protection |
-| Multiple Claude instances | Stays awake until ALL stop |
+| Claude starts working | `disablesleep 1` |
+| Claude stops | `disablesleep 0` |
+| Mac overheats | Force `disablesleep 0` |
+| Multiple instances | Stays awake until ALL stop |
 
 ### Sleep Behavior
 
@@ -116,7 +123,7 @@ pmset -g therm
 ### Reset everything
 ```bash
 sudo pmset -a disablesleep 0
-rm -f /tmp/claude_active_count /tmp/claude_caffeinate.pid /tmp/thermal_monitor.pid
+rm -f /tmp/claude_active_count /tmp/thermal_monitor.pid
 ```
 
 ## License
