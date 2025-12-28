@@ -1,26 +1,29 @@
 #!/bin/bash
 
 # Prevent Mac from sleeping while Claude Code is running
-# Supports multiple Claude instances
+# Tracks by PID for accurate counting even with interrupts
 
-COUNTER_FILE="/tmp/claude_active_count"
+PIDS_DIR="/tmp/claude_working_pids"
 LOCK_DIR="/tmp/claude_sleep.lock"
 
-# Acquire lock (mkdir is atomic)
+# Acquire lock
 while ! mkdir "$LOCK_DIR" 2>/dev/null; do
     sleep 0.1
 done
 trap 'rmdir "$LOCK_DIR" 2>/dev/null' EXIT
 
-# Increment counter
-count=0
-[ -f "$COUNTER_FILE" ] && count=$(cat "$COUNTER_FILE")
-count=$((count + 1))
-echo "$count" > "$COUNTER_FILE"
+# Create PIDs directory
+mkdir -p "$PIDS_DIR"
 
-# If first Claude instance, set up sleep prevention
+# Register this Claude's parent PID (the claude process)
+# PPID is the parent of this script, which is the claude process
+echo "$$" > "$PIDS_DIR/$PPID"
+
+# Count active PIDs
+count=$(ls -1 "$PIDS_DIR" 2>/dev/null | wc -l | tr -d ' ')
+
+# If first working instance, enable sleep prevention
 if [ "$count" -eq 1 ]; then
-    # Disable sleep completely (works with lid closed, on battery)
     sudo pmset -a disablesleep 1
 
     # Start thermal monitor

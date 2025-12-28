@@ -1,24 +1,23 @@
 #!/bin/bash
 
-# Re-enable Mac sleep only when ALL Claude instances have stopped
+# Re-enable Mac sleep when Claude stops working
 
-COUNTER_FILE="/tmp/claude_active_count"
+PIDS_DIR="/tmp/claude_working_pids"
 LOCK_DIR="/tmp/claude_sleep.lock"
 
-# Acquire lock (mkdir is atomic)
+# Acquire lock
 while ! mkdir "$LOCK_DIR" 2>/dev/null; do
     sleep 0.1
 done
 trap 'rmdir "$LOCK_DIR" 2>/dev/null' EXIT
 
-# Decrement counter
-count=0
-[ -f "$COUNTER_FILE" ] && count=$(cat "$COUNTER_FILE")
-count=$((count - 1))
-[ "$count" -lt 0 ] && count=0
-echo "$count" > "$COUNTER_FILE"
+# Remove this Claude's PID file
+rm -f "$PIDS_DIR/$PPID"
 
-# If no more Claude instances, re-enable sleep
+# Count remaining active PIDs
+count=$(ls -1 "$PIDS_DIR" 2>/dev/null | wc -l | tr -d ' ')
+
+# If no more working instances, re-enable sleep
 if [ "$count" -eq 0 ]; then
     # Kill thermal monitor
     if [ -f /tmp/thermal_monitor.pid ]; then
@@ -26,11 +25,7 @@ if [ "$count" -eq 0 ]; then
         rm /tmp/thermal_monitor.pid
     fi
 
-    # Re-enable sleep
     sudo pmset -a disablesleep 0
-
-    # Clean up counter file
-    rm -f "$COUNTER_FILE"
 fi
 
 rmdir "$LOCK_DIR" 2>/dev/null
