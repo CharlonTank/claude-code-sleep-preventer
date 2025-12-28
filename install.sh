@@ -90,6 +90,37 @@ echo "Setting default sleep timeout to 5 minutes..."
 sudo pmset -a sleep 5
 sudo pmset -a disablesleep 0
 
+# Install SwiftBar menu bar plugin
+echo ""
+echo "Do you want to install the menu bar HUD? (requires SwiftBar)"
+read -p "Install HUD? [y/N] " -n 1 -r
+echo ""
+
+if [[ $REPLY =~ ^[Yy]$ ]]; then
+    # Check if SwiftBar is installed
+    if ! command -v swiftbar &> /dev/null && [ ! -d "/Applications/SwiftBar.app" ]; then
+        echo "SwiftBar not found. Installing via Homebrew..."
+        if command -v brew &> /dev/null; then
+            brew install --cask swiftbar
+        else
+            echo "Homebrew not found. Please install SwiftBar manually:"
+            echo "  brew install --cask swiftbar"
+            echo "  Or download from: https://github.com/swiftbar/SwiftBar/releases"
+        fi
+    fi
+
+    # Set up SwiftBar plugin directory
+    SWIFTBAR_DIR="$HOME/Library/Application Support/SwiftBar/Plugins"
+    mkdir -p "$SWIFTBAR_DIR"
+
+    # Copy plugin
+    cp "$SCRIPT_DIR/swiftbar/claude-sleep-status.1s.sh" "$SWIFTBAR_DIR/"
+    chmod +x "$SWIFTBAR_DIR/claude-sleep-status.1s.sh"
+
+    echo "SwiftBar plugin installed!"
+    echo "Launch SwiftBar and set plugin folder to: $SWIFTBAR_DIR"
+fi
+
 echo ""
 echo "Installation complete!"
 echo ""
@@ -100,3 +131,7 @@ echo "  - When Claude starts working: Mac stays awake (even with lid closed)"
 echo "  - When Claude stops: Normal sleep behavior resumes"
 echo "  - If Mac overheats: Forces sleep for protection"
 echo "  - Multiple Claude instances: Stays awake until ALL stop"
+echo ""
+echo "Menu bar shows:"
+echo "  ☕ N  = N Claude instances active, sleep disabled"
+echo "  😴    = No Claude active, sleep enabled"

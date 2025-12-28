@@ -2,6 +2,11 @@
 
 Keep your Mac awake while Claude Code is working, even with the lid closed.
 
+<p align="center">
+  <img src="https://img.shields.io/badge/☕_2-Claude_Active-green" alt="Active">
+  <img src="https://img.shields.io/badge/😴-Sleep_Enabled-gray" alt="Sleeping">
+</p>
+
 ## Features
 
 - Prevents sleep while Claude Code is running
@@ -9,6 +14,7 @@ Keep your Mac awake while Claude Code is working, even with the lid closed.
 - Supports multiple Claude Code instances
 - Automatic thermal protection (forces sleep if Mac overheats)
 - Re-enables normal sleep when Claude finishes
+- **Menu bar HUD** showing active Claude count
 
 ## Requirements
 
@@ -105,6 +111,30 @@ If you prefer to install manually:
      }
    }
    ```
+
+## Menu Bar HUD
+
+The installer can optionally set up a menu bar indicator using [SwiftBar](https://github.com/swiftbar/SwiftBar):
+
+| Icon | Meaning |
+|------|---------|
+| ☕ 1 | 1 Claude instance active, sleep disabled |
+| ☕ 2 | 2 Claude instances active, sleep disabled |
+| 😴 | No Claude active, sleep enabled |
+
+Click the icon for more details and a manual override option.
+
+### Manual HUD Installation
+
+If you skipped HUD during install:
+
+```bash
+brew install --cask swiftbar
+mkdir -p ~/Library/Application\ Support/SwiftBar/Plugins
+cp swiftbar/claude-sleep-status.1s.sh ~/Library/Application\ Support/SwiftBar/Plugins/
+```
+
+Launch SwiftBar and point it to the plugins folder.
 
 ## Troubleshooting
 
