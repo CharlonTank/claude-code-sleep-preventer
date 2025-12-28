@@ -1,10 +1,11 @@
 #!/bin/bash
 
 # SwiftBar plugin for Claude Code Sleep Preventer
-# Detects working Claude instances by CPU usage (>1% = working)
+# Detects working Claude instances by CPU usage (>10% = working)
 
 # Count Claude processes actively using CPU (working)
-working=$(ps aux | grep "[c]laude" | awk '$3 > 1.0 {count++} END {print count+0}')
+# Threshold 10% - typing uses ~1-5%, actual work uses 15%+
+working=$(ps aux | grep "[c]laude" | awk '$3 > 10.0 {count++} END {print count+0}')
 
 # Count total Claude processes
 running=$(pgrep -x "claude" 2>/dev/null | wc -l | tr -d ' ')
