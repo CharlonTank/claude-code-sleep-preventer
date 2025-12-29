@@ -6,3 +6,4 @@ build/
 # Added by cargo
 
 /target
+*.dmg
