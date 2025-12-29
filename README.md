@@ -23,6 +23,20 @@ Keep your Mac awake while Claude Code is working, even with the lid closed.
 
 ## Installation
 
+### Option 1: Homebrew (recommended)
+
+```bash
+brew tap CharlonTank/tap
+brew install claude-sleep-preventer
+claude-sleep-preventer install
+```
+
+### Option 2: DMG Installer
+
+Download [ClaudeSleepPreventer-1.0.0.dmg](https://github.com/CharlonTank/claude-code-sleep-preventer/releases/latest), open it, and double-click the app.
+
+### Option 3: Manual
+
 ```bash
 git clone https://github.com/CharlonTank/claude-code-sleep-preventer.git
 cd claude-code-sleep-preventer
