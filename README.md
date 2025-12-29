@@ -1,25 +1,61 @@
-# Claude Code Sleep Preventer
+<div align="center">
 
-Keep your Mac awake while Claude Code is working, even with the lid closed.
+# ☕ Claude Code Sleep Preventer
 
-<p align="center">
-  <img src="https://img.shields.io/badge/Rust-🦀-orange" alt="Rust">
-  <img src="https://img.shields.io/badge/☕_2-Claude_Active-green" alt="Active">
-  <img src="https://img.shields.io/badge/😴-Sleep_Enabled-gray" alt="Sleeping">
-</p>
+### Keep your Mac awake while Claude Code is working
+**Close your laptop lid. Walk away. Come back to finished work.**
 
-## Features
+<br>
 
-- Single Rust binary - no dependencies
-- Prevents sleep while Claude Code is working
-- Works with lid closed (on AC or battery)
-- Supports multiple Claude Code instances
-- Automatic cleanup of interrupted sessions
-- Re-enables normal sleep when Claude finishes
+[![Download DMG](https://img.shields.io/badge/Download-DMG%20Installer-blue?style=for-the-badge&logo=apple)](https://github.com/CharlonTank/claude-code-sleep-preventer/releases/latest/download/ClaudeSleepPreventer-1.0.0.dmg)
+
+<br>
+
+![macOS](https://img.shields.io/badge/macOS-000000?style=flat&logo=apple&logoColor=white)
+![Rust](https://img.shields.io/badge/Rust-000000?style=flat&logo=rust&logoColor=white)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![GitHub release](https://img.shields.io/github/v/release/CharlonTank/claude-code-sleep-preventer)](https://github.com/CharlonTank/claude-code-sleep-preventer/releases)
+
+</div>
+
+---
+
+## The Problem
+
+You ask Claude to refactor your codebase. It's going to take 10 minutes. You close your MacBook lid to grab coffee...
+
+**💀 Mac sleeps. Claude stops. Work lost.**
+
+## The Solution
+
+Install this tool. Now your Mac stays awake while Claude works, even with the lid closed. When Claude finishes, normal sleep resumes.
+
+<div align="center">
+
+| Before | After |
+|--------|-------|
+| 😴 Lid closed = Mac sleeps | ☕ Lid closed = Claude keeps working |
+| 🔄 Come back to interrupted work | ✅ Come back to finished work |
+
+</div>
+
+---
 
 ## Installation
 
-### Option 1: Homebrew (recommended)
+### 🍎 One-Click Install (Recommended)
+
+<div align="center">
+
+[![Download DMG](https://img.shields.io/badge/📦_Download_DMG-v1.0.0-blue?style=for-the-badge)](https://github.com/CharlonTank/claude-code-sleep-preventer/releases/latest/download/ClaudeSleepPreventer-1.0.0.dmg)
+
+</div>
+
+1. Download the DMG
+2. Open it and double-click the installer
+3. Restart Claude Code
+
+### 🍺 Homebrew
 
 ```bash
 brew tap CharlonTank/tap
@@ -27,15 +63,7 @@ brew install claude-sleep-preventer
 claude-sleep-preventer install
 ```
 
-### Option 2: Download Binary
-
-```bash
-curl -L https://github.com/CharlonTank/claude-code-sleep-preventer/releases/latest/download/claude-sleep-preventer -o /usr/local/bin/claude-sleep-preventer
-chmod +x /usr/local/bin/claude-sleep-preventer
-claude-sleep-preventer install
-```
-
-### Option 3: Build from Source
+### 🦀 Build from Source
 
 ```bash
 git clone https://github.com/CharlonTank/claude-code-sleep-preventer.git
@@ -44,73 +72,49 @@ cargo build --release
 ./target/release/claude-sleep-preventer install
 ```
 
-**Restart Claude Code after installation.**
-
-## Usage
-
-```bash
-# Check status
-claude-sleep-preventer status
-
-# Clean up stale PIDs (interrupted sessions)
-claude-sleep-preventer cleanup
-
-# Run cleanup daemon (optional, runs every second)
-claude-sleep-preventer daemon
-
-# Uninstall
-claude-sleep-preventer uninstall
-```
+---
 
 ## How It Works
 
-Uses Claude Code hooks to track activity:
+```
+You send a prompt
+       ↓
+   Claude starts working → 🔒 Sleep disabled
+       ↓
+   Claude finishes → 🔓 Sleep re-enabled
+```
 
-| Hook | When It Fires |
-|------|---------------|
-| `UserPromptSubmit` | User sends a prompt |
-| `PreToolUse` | Before each tool (Read, Write, Bash, etc.) |
-| `PreCompact` | Before context compacting |
-| `Stop` | Claude finishes responding |
+That's it. No configuration needed.
 
-Each hook calls `claude-sleep-preventer start` which:
-1. Creates a PID file in `/tmp/claude_working_pids/`
-2. Disables sleep via `pmset -a disablesleep 1`
-
-When Claude stops, `claude-sleep-preventer stop`:
-1. Removes the PID file
-2. Re-enables sleep if no other instances are working
-
-### Interrupt Detection
-
-If you interrupt Claude (Ctrl+C), the Stop hook doesn't fire. Run `cleanup` or `daemon` to detect idle processes (CPU < 1% for >10 seconds) and clean up.
+---
 
 ## Commands
 
-| Command | Description |
-|---------|-------------|
-| `start` | Register process, disable sleep |
-| `stop` | Unregister process, enable sleep |
-| `status` | Show current state |
-| `cleanup` | Clean up stale PIDs |
-| `daemon` | Run cleanup every second |
-| `install` | Install hooks and configure |
-| `uninstall` | Remove hooks and restore defaults |
-
-## Troubleshooting
-
 ```bash
-# Check status
-claude-sleep-preventer status
-
-# Manual cleanup
-claude-sleep-preventer cleanup
-
-# Reset everything
-claude-sleep-preventer uninstall
-sudo pmset -a disablesleep 0
+claude-sleep-preventer status     # Check current state
+claude-sleep-preventer cleanup    # Clean up after interrupts
+claude-sleep-preventer uninstall  # Remove completely
 ```
 
-## License
+---
 
-MIT
+## FAQ
+
+**Does it drain my battery?**
+No more than usual. Your Mac just stays awake instead of sleeping.
+
+**What if I interrupt Claude with Ctrl+C?**
+Run `claude-sleep-preventer cleanup` or the tool auto-detects idle sessions after 10 seconds.
+
+**Does it work with multiple Claude instances?**
+Yes! Mac stays awake until ALL instances finish.
+
+---
+
+<div align="center">
+
+Made with ☕ for Claude Code users
+
+[Report Issue](https://github.com/CharlonTank/claude-code-sleep-preventer/issues) · [View Releases](https://github.com/CharlonTank/claude-code-sleep-preventer/releases)
+
+</div>
