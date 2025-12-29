@@ -35,7 +35,7 @@ if [ -f "$SUDOERS_FILE" ]; then
 fi
 
 # Clean up temp files
-rm -f /tmp/claude_active_count
+rm -rf /tmp/claude_working_pids
 rm -f /tmp/claude_sleep.lock
 rmdir /tmp/claude_sleep.lock 2>/dev/null || true
 

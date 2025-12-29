@@ -1,23 +1,69 @@
 #!/bin/bash
 
 # SwiftBar plugin for Claude Code Sleep Preventer
-# Detects working Claude instances by CPU usage (>1% = working)
+# Uses hooks for tracking + CPU check to clean up interrupted sessions
 
-# Count Claude processes actively using CPU (working)
-working=$(ps aux | grep "[c]laude" | awk '$3 > 1.0 {count++} END {print count+0}')
+PIDS_DIR="/tmp/claude_working_pids"
 
-# Count total Claude processes
+# Grace period in seconds - don't clean up PIDs younger than this
+GRACE_PERIOD=10
+
+# Clean up stale PIDs:
+# 1. Process doesn't exist anymore
+# 2. Process exists but idle (CPU < 1%) AND older than grace period
+if [ -d "$PIDS_DIR" ]; then
+    now=$(date +%s)
+    for pidfile in "$PIDS_DIR"/*; do
+        [ -f "$pidfile" ] || continue
+        pid=$(basename "$pidfile")
+
+        # Check if process exists
+        if ! ps -p "$pid" > /dev/null 2>&1; then
+            rm -f "$pidfile"
+            continue
+        fi
+
+        # Check file age - skip cleanup if too new (handles compacting, brief pauses)
+        file_mtime=$(stat -f %m "$pidfile" 2>/dev/null)
+        if [ -n "$file_mtime" ]; then
+            age=$((now - file_mtime))
+            if [ "$age" -lt "$GRACE_PERIOD" ]; then
+                continue
+            fi
+        fi
+
+        # Check if process is idle (CPU < 1%)
+        cpu=$(ps -p "$pid" -o %cpu= 2>/dev/null | tr -d ' ')
+        if [ -n "$cpu" ]; then
+            idle=$(echo "$cpu < 1.0" | bc -l 2>/dev/null)
+            if [ "$idle" = "1" ]; then
+                rm -f "$pidfile"
+            fi
+        fi
+    done
+fi
+
+# Count working instances
+working=0
+if [ -d "$PIDS_DIR" ]; then
+    working=$(ls -1 "$PIDS_DIR" 2>/dev/null | wc -l | tr -d ' ')
+fi
+
+# Count total running
 running=$(pgrep -x "claude" 2>/dev/null | wc -l | tr -d ' ')
 
 sleep_disabled=$(pmset -g | grep SleepDisabled | awk '{print $2}')
 
-# Auto-manage sleep based on working status
+# Auto-fix sleep state
+if [ "$working" -gt 0 ] && [ "$sleep_disabled" != "1" ]; then
+    sudo pmset -a disablesleep 1 2>/dev/null
+    sleep_disabled=1
+elif [ "$working" -eq 0 ] && [ "$sleep_disabled" = "1" ]; then
+    sudo pmset -a disablesleep 0 2>/dev/null
+    sleep_disabled=0
+fi
+
 if [ "$working" -gt 0 ]; then
-    # Claude is working - ensure sleep is disabled
-    if [ "$sleep_disabled" != "1" ]; then
-        sudo pmset -a disablesleep 1 2>/dev/null
-        sleep_disabled=1
-    fi
     echo "☕ $working"
     echo "---"
     echo "Claude Code Sleep Preventer | color=green"
@@ -31,23 +77,17 @@ if [ "$working" -gt 0 ]; then
         echo "Thermal: Warning! | color=red"
     fi
     echo "---"
-    echo "Force Enable Sleep | bash='sudo pmset -a disablesleep 0' terminal=false refresh=true"
+    echo "Force Enable Sleep | bash='sudo pmset -a disablesleep 0 && rm -rf /tmp/claude_working_pids' terminal=false refresh=true"
+elif [ "$running" -gt 0 ]; then
+    echo "💤 $running"
+    echo "---"
+    echo "Claude Code Sleep Preventer | color=gray"
+    echo "$running open (idle)"
+    echo "Sleep: Enabled | color=green"
 else
-    # No Claude working - ensure sleep is enabled
-    if [ "$sleep_disabled" = "1" ]; then
-        sudo pmset -a disablesleep 0 2>/dev/null
-        sleep_disabled=0
-    fi
-    if [ "$running" -gt 0 ]; then
-        echo "💤 $running"
-        echo "---"
-        echo "Claude Code Sleep Preventer | color=gray"
-        echo "$running open (idle)"
-    else
-        echo "😴"
-        echo "---"
-        echo "Claude Code Sleep Preventer | color=gray"
-        echo "No Claude instances"
-    fi
+    echo "😴"
+    echo "---"
+    echo "Claude Code Sleep Preventer | color=gray"
+    echo "No Claude instances"
     echo "Sleep: Enabled | color=green"
 fi

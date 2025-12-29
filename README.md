@@ -45,19 +45,26 @@ The installer will:
 
 ## How It Works
 
-Uses `pmset -a disablesleep` to control Mac sleep state via Claude Code hooks:
+Uses **multiple hooks** to track all Claude activity:
 
-- **UserPromptSubmit hook**: Runs `prevent-sleep.sh` → disables sleep
-- **Stop hook**: Runs `allow-sleep.sh` → re-enables sleep
+| Hook | When It Fires |
+|------|---------------|
+| `UserPromptSubmit` | User sends a prompt |
+| `PreToolUse` | Before each tool (Read, Write, Bash, etc.) |
+| `PreCompact` | Before context compacting |
+| `Stop` | Claude finishes responding |
 
-A thermal monitor runs in the background and forces sleep if the Mac overheats.
+Each hook refreshes a PID file timestamp. SwiftBar monitors these files and only cleans up if:
+- Process doesn't exist, OR
+- PID file is >10 seconds old AND CPU < 1% (truly idle)
 
 | Event | Action |
 |-------|--------|
-| Claude starts working | `disablesleep 1` |
-| Claude stops | `disablesleep 0` |
-| Mac overheats | Force `disablesleep 0` |
+| Any hook fires | Creates/refreshes PID file, `disablesleep 1` |
+| Claude stops normally | Removes PID file, `disablesleep 0` |
+| User interrupts Claude | SwiftBar detects idle after 10s, cleans up |
 | Multiple instances | Stays awake until ALL stop |
+| Mac overheats | Force `disablesleep 0` (via HUD) |
 
 ### Sleep Behavior
 
@@ -98,6 +105,26 @@ If you prefer to install manually:
            ]
          }
        ],
+       "PreToolUse": [
+         {
+           "hooks": [
+             {
+               "type": "command",
+               "command": "$HOME/.claude/hooks/prevent-sleep.sh"
+             }
+           ]
+         }
+       ],
+       "PreCompact": [
+         {
+           "hooks": [
+             {
+               "type": "command",
+               "command": "$HOME/.claude/hooks/prevent-sleep.sh"
+             }
+           ]
+         }
+       ],
        "Stop": [
          {
            "hooks": [
@@ -118,9 +145,10 @@ The installer can optionally set up a menu bar indicator using [SwiftBar](https:
 
 | Icon | Meaning |
 |------|---------|
-| ☕ 1 | 1 Claude instance active, sleep disabled |
-| ☕ 2 | 2 Claude instances active, sleep disabled |
-| 😴 | No Claude active, sleep enabled |
+| ☕ 1 | 1 Claude instance working, sleep disabled |
+| ☕ 2 | 2 Claude instances working, sleep disabled |
+| 💤 3 | 3 Claude instances open but idle, sleep enabled |
+| 😴 | No Claude instances, sleep enabled |
 
 Click the icon for more details and a manual override option.
 
@@ -143,8 +171,8 @@ Launch SwiftBar and point it to the plugins folder.
 # See if sleep is disabled
 pmset -g | grep SleepDisabled
 
-# See active Claude count
-cat /tmp/claude_active_count
+# See active Claude PIDs
+ls -la /tmp/claude_working_pids/
 
 # Check thermal state
 pmset -g therm
@@ -153,7 +181,7 @@ pmset -g therm
 ### Reset everything
 ```bash
 sudo pmset -a disablesleep 0
-rm -f /tmp/claude_active_count /tmp/thermal_monitor.pid
+rm -rf /tmp/claude_working_pids
 ```
 
 ## License

@@ -48,6 +48,26 @@ HOOKS_CONFIG='{
       ]
     }
   ],
+  "PreToolUse": [
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "$HOME/.claude/hooks/prevent-sleep.sh"
+        }
+      ]
+    }
+  ],
+  "PreCompact": [
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "$HOME/.claude/hooks/prevent-sleep.sh"
+        }
+      ]
+    }
+  ],
   "Stop": [
     {
       "hooks": [
@@ -133,5 +153,6 @@ echo "  - If Mac overheats: Forces sleep for protection"
 echo "  - Multiple Claude instances: Stays awake until ALL stop"
 echo ""
 echo "Menu bar shows:"
-echo "  ☕ N  = N Claude instances active, sleep disabled"
-echo "  😴    = No Claude active, sleep enabled"
+echo "  ☕ N  = N Claude instances working, sleep disabled"
+echo "  💤 N = N Claude instances idle, sleep enabled"
+echo "  😴    = No Claude instances, sleep enabled"
