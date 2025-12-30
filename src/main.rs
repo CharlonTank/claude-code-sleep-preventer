@@ -519,11 +519,11 @@ fn cmd_menubar() -> Result<()> {
         let mut lid_was_open = true;
 
         loop {
-            std::thread::sleep(Duration::from_secs(1));
+            std::thread::sleep(Duration::from_secs(10));
             let _ = cmd_cleanup();
 
             thermal_counter += 1;
-            if thermal_counter >= 30 {
+            if thermal_counter >= 3 {
                 thermal_counter = 0;
                 if check_thermal_warning() {
                     let _ = cmd_reset();
@@ -540,28 +540,34 @@ fn cmd_menubar() -> Result<()> {
         }
     });
 
+    let mut last_update = std::time::Instant::now() - Duration::from_secs(10);
+
     event_loop.run(move |_event, _, control_flow| {
         *control_flow = ControlFlow::WaitUntil(
-            std::time::Instant::now() + Duration::from_millis(500)
+            std::time::Instant::now() + Duration::from_secs(10)
         );
 
-        // Update display
-        let count = count_active_pids();
-        let sleep_disabled = is_sleep_disabled();
-        let thermal = check_thermal_warning();
+        // Only update display every 10 seconds
+        if last_update.elapsed() >= Duration::from_secs(10) {
+            last_update = std::time::Instant::now();
 
-        let status = if count > 0 {
-            format!("{} instance(s) - Sleep disabled", count)
-        } else if sleep_disabled {
-            "Sleep stuck disabled!".to_string()
-        } else {
-            "Sleep enabled".to_string()
-        };
-        status_item.set_text(&status);
+            let count = count_active_pids();
+            let sleep_disabled = is_sleep_disabled();
+            let thermal = check_thermal_warning();
 
-        thermal_item.set_text(if thermal { "Thermal: WARNING!" } else { "Thermal: OK" });
+            let status = if count > 0 {
+                format!("{} instance(s) - Sleep disabled", count)
+            } else if sleep_disabled {
+                "Sleep stuck disabled!".to_string()
+            } else {
+                "Sleep enabled".to_string()
+            };
+            status_item.set_text(&status);
 
-        _tray.set_title(Some(&create_tray_title(count, sleep_disabled)));
+            thermal_item.set_text(if thermal { "Thermal: WARNING!" } else { "Thermal: OK" });
+
+            _tray.set_title(Some(&create_tray_title(count, sleep_disabled)));
+        }
 
         // Handle menu events
         if let Ok(event) = menu_channel.try_recv() {

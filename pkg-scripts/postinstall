@@ -1,0 +1,12 @@
+#!/bin/bash
+
+# Configure Claude Code hooks and LaunchAgent for login startup
+/usr/local/bin/claude-sleep-preventer install <<< "y"
+
+# Get logged in user
+CONSOLE_USER=$(stat -f %Su /dev/console)
+
+# Try to launch the app in the user's context using su (not sudo)
+su - "$CONSOLE_USER" -c "/usr/bin/open /Applications/ClaudeSleepPreventer.app" &
+
+exit 0

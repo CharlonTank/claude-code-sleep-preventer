@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<installer-gui-script minSpecVersion="1">
+    <title>Claude Sleep Preventer</title>
+    <organization>com.charlontank</organization>
+    <domains enable_localSystem="true"/>
+    <options customize="never" require-scripts="true" rootVolumeOnly="true"/>
+
+    <choices-outline>
+        <line choice="default"/>
+    </choices-outline>
+
+    <choice id="default" title="Claude Sleep Preventer" visible="false">
+        <pkg-ref id="com.charlontank.claude-sleep-preventer-cli"/>
+        <pkg-ref id="com.charlontank.claude-sleep-preventer"/>
+    </choice>
+
+    <pkg-ref id="com.charlontank.claude-sleep-preventer-cli" version="2.1.4">ClaudeSleepPreventer-cli.pkg</pkg-ref>
+    <pkg-ref id="com.charlontank.claude-sleep-preventer" version="2.1.4">ClaudeSleepPreventer-app.pkg</pkg-ref>
+</installer-gui-script>
