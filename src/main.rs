@@ -496,8 +496,8 @@ fn cmd_install() -> Result<()> {
 
     fs::create_dir_all(&hooks_dir)?;
 
-    let prevent_script = "#!/bin/bash\n/usr/local/bin/claude-sleep-preventer start\n";
-    let allow_script = "#!/bin/bash\n/usr/local/bin/claude-sleep-preventer stop\n";
+    let prevent_script = "#!/bin/bash\n[ -x /usr/local/bin/claude-sleep-preventer ] && /usr/local/bin/claude-sleep-preventer start 2>/dev/null || true\n";
+    let allow_script = "#!/bin/bash\n[ -x /usr/local/bin/claude-sleep-preventer ] && /usr/local/bin/claude-sleep-preventer stop 2>/dev/null || true\n";
 
     fs::write(hooks_dir.join("prevent-sleep.sh"), prevent_script)?;
     fs::write(hooks_dir.join("allow-sleep.sh"), allow_script)?;
