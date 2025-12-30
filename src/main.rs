@@ -379,7 +379,66 @@ fn create_tray_title(count: usize, sleep_disabled: bool) -> String {
     }
 }
 
+fn is_installed() -> bool {
+    let home = dirs::home_dir().unwrap_or_default();
+    home.join(".claude/hooks/prevent-sleep.sh").exists()
+}
+
+fn run_first_time_setup() -> Result<()> {
+    let result = Command::new("osascript")
+        .args([
+            "-e",
+            r#"display dialog "Claude Sleep Preventer needs to be configured to work with Claude Code.
+
+This will:
+• Install the CLI tool
+• Configure Claude Code hooks
+• Set up automatic startup
+
+Administrator password required." buttons {"Cancel", "Set Up"} default button "Set Up" with title "Claude Sleep Preventer" with icon note"#,
+        ])
+        .output()?;
+
+    if !result.status.success() || String::from_utf8_lossy(&result.stdout).contains("Cancel") {
+        return Ok(());
+    }
+
+    let script = r#"do shell script "echo 'y' | /Applications/ClaudeSleepPreventer.app/Contents/MacOS/claude-sleep-preventer install" with administrator privileges"#;
+
+    let install_result = Command::new("osascript")
+        .args(["-e", script])
+        .output()?;
+
+    if install_result.status.success() {
+        let _ = Command::new("osascript")
+            .args([
+                "-e",
+                r#"display dialog "Setup complete!
+
+Restart Claude Code to activate sleep prevention." buttons {"OK"} default button "OK" with title "Claude Sleep Preventer" with icon note"#,
+            ])
+            .output();
+    } else {
+        let error = String::from_utf8_lossy(&install_result.stderr);
+        let _ = Command::new("osascript")
+            .args([
+                "-e",
+                &format!(r#"display dialog "Setup failed: {}" buttons {{"OK"}} default button "OK" with title "Claude Sleep Preventer" with icon stop"#, error.lines().next().unwrap_or("Unknown error")),
+            ])
+            .output();
+    }
+
+    Ok(())
+}
+
 fn cmd_menubar() -> Result<()> {
+    if !is_installed() {
+        run_first_time_setup()?;
+        if !is_installed() {
+            return Ok(());
+        }
+    }
+
     let event_loop = EventLoopBuilder::new().build();
 
     let menu = Menu::new();
@@ -496,8 +555,9 @@ fn cmd_install() -> Result<()> {
 
     fs::create_dir_all(&hooks_dir)?;
 
-    let prevent_script = "#!/bin/bash\n[ -x /usr/local/bin/claude-sleep-preventer ] && /usr/local/bin/claude-sleep-preventer start 2>/dev/null || true\n";
-    let allow_script = "#!/bin/bash\n[ -x /usr/local/bin/claude-sleep-preventer ] && /usr/local/bin/claude-sleep-preventer stop 2>/dev/null || true\n";
+    let app_binary = "/Applications/ClaudeSleepPreventer.app/Contents/MacOS/claude-sleep-preventer";
+    let prevent_script = format!("#!/bin/bash\n[ -x \"{}\" ] && \"{}\" start 2>/dev/null || true\n", app_binary, app_binary);
+    let allow_script = format!("#!/bin/bash\n[ -x \"{}\" ] && \"{}\" stop 2>/dev/null || true\n", app_binary, app_binary);
 
     fs::write(hooks_dir.join("prevent-sleep.sh"), prevent_script)?;
     fs::write(hooks_dir.join("allow-sleep.sh"), allow_script)?;
@@ -592,6 +652,11 @@ fn cmd_install() -> Result<()> {
     println!("  claude-sleep-preventer reset    - Force enable sleep");
     println!("  claude-sleep-preventer menubar  - Run native menu bar");
     println!("  claude-sleep-preventer daemon   - Run background daemon");
+
+    // Try to launch the app
+    let _ = Command::new("open")
+        .arg("/Applications/ClaudeSleepPreventer.app")
+        .spawn();
 
     Ok(())
 }
