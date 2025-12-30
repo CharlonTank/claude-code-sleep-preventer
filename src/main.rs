@@ -7,6 +7,7 @@ use std::process::Command;
 use std::time::Duration;
 use sysinfo::System;
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
+use tao::platform::macos::{ActivationPolicy, EventLoopExtMacOS};
 use tray_icon::{
     menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
     TrayIconBuilder,
@@ -431,6 +432,43 @@ Restart Claude Code to activate sleep prevention." buttons {"OK"} default button
     Ok(())
 }
 
+fn run_uninstall_flow() -> Result<()> {
+    let result = Command::new("osascript")
+        .args([
+            "-e",
+            r#"display dialog "Are you sure you want to uninstall Claude Sleep Preventer?
+
+This will remove:
+• Claude Code hooks
+• Launch agent
+• Sudoers configuration
+
+The app will remain in /Applications." buttons {"Cancel", "Uninstall"} default button "Cancel" with title "Uninstall" with icon caution"#,
+        ])
+        .output()?;
+
+    if !result.status.success() || String::from_utf8_lossy(&result.stdout).contains("Cancel") {
+        return Ok(());
+    }
+
+    let script = r#"do shell script "/Applications/ClaudeSleepPreventer.app/Contents/MacOS/claude-sleep-preventer uninstall" with administrator privileges"#;
+
+    let _ = Command::new("osascript")
+        .args(["-e", script])
+        .output();
+
+    let _ = Command::new("osascript")
+        .args([
+            "-e",
+            r#"display dialog "Uninstall complete.
+
+You can delete the app from /Applications manually." buttons {"OK"} default button "OK" with title "Uninstall" with icon note"#,
+        ])
+        .output();
+
+    Ok(())
+}
+
 fn cmd_menubar() -> Result<()> {
     if !is_installed() {
         run_first_time_setup()?;
@@ -439,7 +477,8 @@ fn cmd_menubar() -> Result<()> {
         }
     }
 
-    let event_loop = EventLoopBuilder::new().build();
+    let mut event_loop = EventLoopBuilder::new().build();
+    event_loop.set_activation_policy(ActivationPolicy::Accessory);
 
     let menu = Menu::new();
     let status_item = MenuItem::new("Loading...", false, None);
@@ -448,6 +487,7 @@ fn cmd_menubar() -> Result<()> {
     let cleanup_item = MenuItem::new("Cleanup Now", true, None);
     let reset_item = MenuItem::new("Force Enable Sleep", true, None);
     let sep2 = PredefinedMenuItem::separator();
+    let uninstall_item = MenuItem::new("Uninstall...", true, None);
     let quit_item = MenuItem::new("Quit", true, None);
 
     menu.append(&status_item)?;
@@ -456,6 +496,7 @@ fn cmd_menubar() -> Result<()> {
     menu.append(&cleanup_item)?;
     menu.append(&reset_item)?;
     menu.append(&sep2)?;
+    menu.append(&uninstall_item)?;
     menu.append(&quit_item)?;
 
     let count = count_active_pids();
@@ -470,6 +511,7 @@ fn cmd_menubar() -> Result<()> {
     let menu_channel = MenuEvent::receiver();
     let cleanup_id = cleanup_item.id().clone();
     let reset_id = reset_item.id().clone();
+    let uninstall_id = uninstall_item.id().clone();
     let quit_id = quit_item.id().clone();
 
     std::thread::spawn(|| {
@@ -527,6 +569,9 @@ fn cmd_menubar() -> Result<()> {
                 let _ = cmd_cleanup();
             } else if event.id == reset_id {
                 let _ = cmd_reset();
+            } else if event.id == uninstall_id {
+                let _ = run_uninstall_flow();
+                *control_flow = ControlFlow::Exit;
             } else if event.id == quit_id {
                 *control_flow = ControlFlow::Exit;
             }

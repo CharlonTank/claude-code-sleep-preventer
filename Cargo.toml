@@ -1,6 +1,6 @@
 [package]
 name = "claude-sleep-preventer"
-version = "2.2.0"
+version = "2.2.1"
 edition = "2021"
 description = "Keep your Mac awake while Claude Code is working"
 license = "MIT"
