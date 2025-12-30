@@ -9,13 +9,13 @@ use sysinfo::System;
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
 use tao::platform::macos::{ActivationPolicy, EventLoopExtMacOS};
 use tray_icon::{
-    menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
+    menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem},
     TrayIconBuilder,
 };
 
 const PIDS_DIR: &str = "/tmp/claude_working_pids";
-const GRACE_PERIOD_SECS: u64 = 10;
-const CPU_IDLE_THRESHOLD: f32 = 1.0;
+const IDLE_TIMEOUT_SECS: u64 = 30;
+const IDLE_CPU_THRESHOLD: f32 = 0.5;
 
 #[derive(Parser)]
 #[command(name = "claude-sleep-preventer")]
@@ -182,7 +182,7 @@ fn cmd_stop() -> Result<()> {
     let _ = fs::remove_file(&pid_file);
 
     if count_active_pids() == 0 {
-        set_sleep_disabled(false)?;
+        enable_sleep_and_trigger_if_lid_closed()?;
     }
 
     Ok(())
@@ -257,14 +257,28 @@ fn is_process_alive(pid: u32) -> bool {
         .unwrap_or(false)
 }
 
-fn is_lid_open() -> bool {
+fn is_lid_closed() -> bool {
     Command::new("ioreg")
         .args(["-r", "-k", "AppleClamshellState", "-d", "4"])
         .output()
         .ok()
         .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| !s.contains("\"AppleClamshellState\" = Yes"))
-        .unwrap_or(true)
+        .map(|s| s.contains("\"AppleClamshellState\" = Yes"))
+        .unwrap_or(false)
+}
+
+fn force_sleep_now() {
+    let _ = Command::new("sudo")
+        .args(["pmset", "sleepnow"])
+        .output();
+}
+
+fn enable_sleep_and_trigger_if_lid_closed() -> Result<()> {
+    set_sleep_disabled(false)?;
+    if is_lid_closed() {
+        force_sleep_now();
+    }
+    Ok(())
 }
 
 fn play_lid_close_sound() {
@@ -307,9 +321,9 @@ fn cmd_cleanup() -> Result<()> {
             }
 
             let age = get_file_age(&path).unwrap_or(0);
-            if age >= GRACE_PERIOD_SECS {
+            if age >= IDLE_TIMEOUT_SECS {
                 let cpu = get_process_cpu(pid);
-                if cpu < CPU_IDLE_THRESHOLD {
+                if cpu < IDLE_CPU_THRESHOLD {
                     let _ = fs::remove_file(&path);
                 }
             }
@@ -323,7 +337,7 @@ fn cmd_cleanup() -> Result<()> {
     if active > 0 && !sleep_disabled {
         set_sleep_disabled(true)?;
     } else if active == 0 && sleep_disabled {
-        set_sleep_disabled(false)?;
+        enable_sleep_and_trigger_if_lid_closed()?;
     }
 
     Ok(())
@@ -332,7 +346,7 @@ fn cmd_cleanup() -> Result<()> {
 fn cmd_reset() -> Result<()> {
     let _ = fs::remove_dir_all(PIDS_DIR);
     let _ = fs::create_dir_all(PIDS_DIR);
-    set_sleep_disabled(false)?;
+    enable_sleep_and_trigger_if_lid_closed()?;
     println!("Reset complete. Sleep re-enabled.");
     Ok(())
 }
@@ -469,6 +483,107 @@ You can delete the app from /Applications manually." buttons {"OK"} default butt
     Ok(())
 }
 
+fn get_process_tty(pid: u32) -> Option<String> {
+    Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "tty="])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty() && s != "??")
+}
+
+fn focus_terminal_by_tty(tty: &str) {
+    let tty_path = if tty.starts_with("/dev/") {
+        tty.to_string()
+    } else {
+        format!("/dev/{}", tty)
+    };
+
+    // Try Terminal.app first
+    let terminal_script = format!(
+        r#"
+        tell application "Terminal"
+            set windowList to every window
+            repeat with w in windowList
+                set tabList to every tab of w
+                repeat with t in tabList
+                    if tty of t is "{}" then
+                        set frontmost of w to true
+                        set selected of t to true
+                        activate
+                        return true
+                    end if
+                end repeat
+            end repeat
+        end tell
+        return false
+        "#,
+        tty_path
+    );
+
+    let result = Command::new("osascript")
+        .args(["-e", &terminal_script])
+        .output();
+
+    if let Ok(output) = result {
+        if String::from_utf8_lossy(&output.stdout).trim() == "true" {
+            return;
+        }
+    }
+
+    // Try iTerm2
+    let iterm_script = format!(
+        r#"
+        tell application "iTerm2"
+            set windowList to every window
+            repeat with w in windowList
+                set tabList to every tab of w
+                repeat with t in tabList
+                    set sessionList to every session of t
+                    repeat with s in sessionList
+                        if tty of s is "{}" then
+                            select w
+                            select t
+                            select s
+                            activate
+                            return true
+                        end if
+                    end repeat
+                end repeat
+            end repeat
+        end tell
+        return false
+        "#,
+        tty_path
+    );
+
+    let _ = Command::new("osascript")
+        .args(["-e", &iterm_script])
+        .output();
+}
+
+fn focus_terminal_by_pid(pid: u32) {
+    if let Some(tty) = get_process_tty(pid) {
+        focus_terminal_by_tty(&tty);
+    }
+}
+
+fn get_instance_items() -> Vec<(u32, u64, f32)> {
+    let mut items = Vec::new();
+    if let Ok(entries) = fs::read_dir(PIDS_DIR) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            let pid: u32 = entry.file_name().to_string_lossy().parse().unwrap_or(0);
+            if pid > 0 {
+                let age = get_file_age(&entry.path()).unwrap_or(0);
+                let cpu = get_process_cpu(pid);
+                items.push((pid, age, cpu));
+            }
+        }
+    }
+    items
+}
+
 fn cmd_menubar() -> Result<()> {
     if !is_installed() {
         run_first_time_setup()?;
@@ -480,27 +595,49 @@ fn cmd_menubar() -> Result<()> {
     let mut event_loop = EventLoopBuilder::new().build();
     event_loop.set_activation_policy(ActivationPolicy::Accessory);
 
-    let menu = Menu::new();
-    let status_item = MenuItem::new("Loading...", false, None);
-    let thermal_item = MenuItem::new("Thermal: OK", false, None);
-    let sep1 = PredefinedMenuItem::separator();
-    let cleanup_item = MenuItem::new("Cleanup Now", true, None);
-    let reset_item = MenuItem::new("Force Enable Sleep", true, None);
-    let sep2 = PredefinedMenuItem::separator();
-    let uninstall_item = MenuItem::new("Uninstall...", true, None);
-    let quit_item = MenuItem::new("Quit", true, None);
-
-    menu.append(&status_item)?;
-    menu.append(&thermal_item)?;
-    menu.append(&sep1)?;
-    menu.append(&cleanup_item)?;
-    menu.append(&reset_item)?;
-    menu.append(&sep2)?;
-    menu.append(&uninstall_item)?;
-    menu.append(&quit_item)?;
-
     let count = count_active_pids();
     let sleep_disabled = is_sleep_disabled();
+
+    let menu = Menu::new();
+
+    let toggle_item = CheckMenuItem::new("Sleep Prevention", true, sleep_disabled, None);
+    menu.append(&toggle_item)?;
+
+    let sep1 = PredefinedMenuItem::separator();
+    menu.append(&sep1)?;
+
+    let initial_instances = get_instance_items();
+    let instances_header = MenuItem::new(
+        if initial_instances.is_empty() { "No Active Instances" } else { "Active Instances" },
+        false,
+        None,
+    );
+    menu.append(&instances_header)?;
+
+    let mut instance_menu_items: Vec<(MenuItem, u32)> = Vec::new();
+    for (pid, age, cpu) in &initial_instances {
+        let item = MenuItem::new(&format!("  PID {} - {}s - {:.1}%", pid, age, cpu), true, None);
+        menu.append(&item)?;
+        instance_menu_items.push((item, *pid));
+    }
+
+    let sep2 = PredefinedMenuItem::separator();
+    menu.append(&sep2)?;
+
+    let thermal_item = MenuItem::new(
+        if check_thermal_warning() { "Thermal: WARNING!" } else { "Thermal: OK" },
+        false,
+        None,
+    );
+    menu.append(&thermal_item)?;
+
+    let sep3 = PredefinedMenuItem::separator();
+    menu.append(&sep3)?;
+
+    let uninstall_item = MenuItem::new("Uninstall...", true, None);
+    let quit_item = MenuItem::new("Quit", true, None);
+    menu.append(&uninstall_item)?;
+    menu.append(&quit_item)?;
 
     let _tray = TrayIconBuilder::new()
         .with_menu(Box::new(menu))
@@ -509,14 +646,13 @@ fn cmd_menubar() -> Result<()> {
         .build()?;
 
     let menu_channel = MenuEvent::receiver();
-    let cleanup_id = cleanup_item.id().clone();
-    let reset_id = reset_item.id().clone();
+    let toggle_id = toggle_item.id().clone();
     let uninstall_id = uninstall_item.id().clone();
     let quit_id = quit_item.id().clone();
 
     std::thread::spawn(|| {
         let mut thermal_counter = 0;
-        let mut lid_was_open = true;
+        let mut lid_was_closed = false;
 
         loop {
             std::thread::sleep(Duration::from_secs(10));
@@ -530,24 +666,21 @@ fn cmd_menubar() -> Result<()> {
                 }
             }
 
-            let lid_open = is_lid_open();
+            let lid_closed = is_lid_closed();
             let active = count_active_pids();
 
-            if lid_was_open && !lid_open && active > 0 {
+            if !lid_was_closed && lid_closed && active > 0 {
                 play_lid_close_sound();
             }
-            lid_was_open = lid_open;
+            lid_was_closed = lid_closed;
         }
     });
 
     let mut last_update = std::time::Instant::now() - Duration::from_secs(10);
 
     event_loop.run(move |_event, _, control_flow| {
-        *control_flow = ControlFlow::WaitUntil(
-            std::time::Instant::now() + Duration::from_secs(10)
-        );
+        *control_flow = ControlFlow::WaitUntil(std::time::Instant::now() + Duration::from_secs(10));
 
-        // Only update display every 10 seconds
         if last_update.elapsed() >= Duration::from_secs(10) {
             last_update = std::time::Instant::now();
 
@@ -555,31 +688,45 @@ fn cmd_menubar() -> Result<()> {
             let sleep_disabled = is_sleep_disabled();
             let thermal = check_thermal_warning();
 
-            let status = if count > 0 {
-                format!("{} instance(s) - Sleep disabled", count)
-            } else if sleep_disabled {
-                "Sleep stuck disabled!".to_string()
-            } else {
-                "Sleep enabled".to_string()
-            };
-            status_item.set_text(&status);
-
+            toggle_item.set_checked(sleep_disabled);
             thermal_item.set_text(if thermal { "Thermal: WARNING!" } else { "Thermal: OK" });
-
             _tray.set_title(Some(&create_tray_title(count, sleep_disabled)));
+
+            let instances = get_instance_items();
+            instances_header.set_text(if instances.is_empty() { "No Active Instances" } else { "Active Instances" });
+            for (i, (item, stored_pid)) in instance_menu_items.iter_mut().enumerate() {
+                if i < instances.len() {
+                    let (pid, age, cpu) = instances[i];
+                    item.set_text(&format!("  PID {} - {}s - {:.1}%", pid, age, cpu));
+                    item.set_enabled(true);
+                    *stored_pid = pid;
+                } else {
+                    item.set_text("");
+                    item.set_enabled(false);
+                    *stored_pid = 0;
+                }
+            }
         }
 
-        // Handle menu events
         if let Ok(event) = menu_channel.try_recv() {
-            if event.id == cleanup_id {
-                let _ = cmd_cleanup();
-            } else if event.id == reset_id {
-                let _ = cmd_reset();
+            if event.id == toggle_id {
+                if toggle_item.is_checked() {
+                    let _ = cmd_reset();
+                } else {
+                    let _ = set_sleep_disabled(true);
+                }
             } else if event.id == uninstall_id {
                 let _ = run_uninstall_flow();
                 *control_flow = ControlFlow::Exit;
             } else if event.id == quit_id {
                 *control_flow = ControlFlow::Exit;
+            } else {
+                for (item, pid) in &instance_menu_items {
+                    if event.id == item.id() && *pid > 0 {
+                        focus_terminal_by_pid(*pid);
+                        break;
+                    }
+                }
             }
         }
     });
