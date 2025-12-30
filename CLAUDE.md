@@ -17,3 +17,5 @@ To publish a new version:
 8. Create GitHub release: `gh release create vX.X.X ClaudeSleepPreventer-X.X.X.dmg --title "vX.X.X" --notes "..."`
 
 **IMPORTANT**: The keychain profile is `"notary"` (NOT "notarytool").
+
+**IMPORTANT**: Update the version number in README.md download links when releasing a new version.
