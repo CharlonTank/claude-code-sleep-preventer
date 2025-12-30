@@ -599,9 +599,32 @@ fn cmd_install() -> Result<()> {
 fn cmd_uninstall() -> Result<()> {
     let home = dirs::home_dir().context("Could not find home directory")?;
     let hooks_dir = home.join(".claude").join("hooks");
+    let settings_file = home.join(".claude").join("settings.json");
+    let launch_agents_dir = home.join("Library/LaunchAgents");
 
     let _ = fs::remove_file(hooks_dir.join("prevent-sleep.sh"));
     let _ = fs::remove_file(hooks_dir.join("allow-sleep.sh"));
+
+    if settings_file.exists() {
+        if let Ok(content) = fs::read_to_string(&settings_file) {
+            if let Ok(mut json) = serde_json::from_str::<serde_json::Value>(&content) {
+                if json.get("hooks").is_some() {
+                    json.as_object_mut().unwrap().remove("hooks");
+                    let _ = fs::write(&settings_file, serde_json::to_string_pretty(&json).unwrap());
+                    println!("Removed hooks from settings.json");
+                }
+            }
+        }
+    }
+
+    let plist_path = launch_agents_dir.join("com.charlontank.claude-sleep-preventer.plist");
+    if plist_path.exists() {
+        let _ = Command::new("launchctl")
+            .args(["unload", plist_path.to_str().unwrap()])
+            .output();
+        let _ = fs::remove_file(&plist_path);
+        println!("Removed LaunchAgent");
+    }
 
     Command::new("sudo")
         .args(["rm", "-f", "/etc/sudoers.d/claude-pmset"])
@@ -614,7 +637,6 @@ fn cmd_uninstall() -> Result<()> {
         .output()?;
 
     println!("✅ Uninstalled successfully");
-    println!("\nNote: Remove hooks from ~/.claude/settings.json manually if needed");
 
     Ok(())
 }
