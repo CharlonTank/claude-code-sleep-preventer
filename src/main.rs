@@ -1,9 +1,17 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use core_foundation::runloop::{
+    kCFRunLoopDefaultMode, CFRunLoopAddSource, CFRunLoopGetCurrent, CFRunLoopRun,
+};
+use io_kit_sys::types::*;
+use io_kit_sys::*;
+use mach2::port::MACH_PORT_NULL;
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
+use std::ptr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use sysinfo::System;
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
@@ -12,6 +20,9 @@ use tray_icon::{
     menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem},
     TrayIconBuilder,
 };
+
+static LID_JUST_CLOSED: AtomicBool = AtomicBool::new(false);
+static LID_WAS_CLOSED: AtomicBool = AtomicBool::new(false);
 
 const PIDS_DIR: &str = "/tmp/claude_working_pids";
 const IDLE_TIMEOUT_SECS: u64 = 30;
@@ -99,7 +110,9 @@ fn find_claude_ancestor() -> Option<u32> {
                 .args(["-p", &ppid.to_string(), "-o", "comm="])
                 .output()
                 .ok()?;
-            let parent_comm = String::from_utf8_lossy(&parent_output.stdout).trim().to_string();
+            let parent_comm = String::from_utf8_lossy(&parent_output.stdout)
+                .trim()
+                .to_string();
 
             if parent_comm == "claude" {
                 return Some(ppid);
@@ -154,8 +167,8 @@ fn check_thermal_warning() -> bool {
         .ok()
         .and_then(|output| String::from_utf8(output.stdout).ok())
         .map(|s| {
-            (s.contains("CPU_Scheduler_Limit") && !s.contains("No CPU")) ||
-            (s.contains("thermal warning level") && !s.contains("No thermal warning"))
+            (s.contains("CPU_Scheduler_Limit") && !s.contains("No CPU"))
+                || (s.contains("thermal warning level") && !s.contains("No thermal warning"))
         })
         .unwrap_or(false)
 }
@@ -208,8 +221,14 @@ fn cmd_status() -> Result<()> {
     println!("==========================================");
     println!("Working instances: {}", active_count);
     println!("Claude processes: {}", claude_count);
-    println!("Sleep disabled: {}", if sleep_disabled { "Yes" } else { "No" });
-    println!("Thermal warning: {}", if thermal_warning { "YES!" } else { "No" });
+    println!(
+        "Sleep disabled: {}",
+        if sleep_disabled { "Yes" } else { "No" }
+    );
+    println!(
+        "Thermal warning: {}",
+        if thermal_warning { "YES!" } else { "No" }
+    );
 
     if active_count > 0 {
         println!("\nActive PIDs:");
@@ -220,7 +239,10 @@ fn cmd_status() -> Result<()> {
                     let age = get_file_age(&entry.path()).unwrap_or(0);
                     let cpu = get_process_cpu(pid);
                     let alive = is_process_alive(pid);
-                    println!("  PID {}: age={}s, cpu={:.1}%, alive={}", pid, age, cpu, alive);
+                    println!(
+                        "  PID {}: age={}s, cpu={:.1}%, alive={}",
+                        pid, age, cpu, alive
+                    );
                 }
             }
         }
@@ -268,9 +290,7 @@ fn is_lid_closed() -> bool {
 }
 
 fn force_sleep_now() {
-    let _ = Command::new("sudo")
-        .args(["pmset", "sleepnow"])
-        .output();
+    let _ = Command::new("sudo").args(["pmset", "sleepnow"]).output();
 }
 
 fn enable_sleep_and_trigger_if_lid_closed() -> Result<()> {
@@ -302,6 +322,80 @@ fn play_lid_close_sound() {
         let _ = Command::new("osascript")
             .args(["-e", &format!("set volume output volume {}", current_vol)])
             .output();
+    });
+}
+
+unsafe extern "C" fn clamshell_notification_callback(
+    _refcon: *mut std::ffi::c_void,
+    _service: io_service_t,
+    _message_type: u32,
+    _message_argument: *mut std::ffi::c_void,
+) {
+    let lid_closed = is_lid_closed();
+    let was_closed = LID_WAS_CLOSED.swap(lid_closed, Ordering::SeqCst);
+
+    if lid_closed && !was_closed {
+        LID_JUST_CLOSED.store(true, Ordering::SeqCst);
+    }
+}
+
+fn start_clamshell_notifications() {
+    std::thread::spawn(|| unsafe {
+        let notify_port = IONotificationPortCreate(kIOMasterPortDefault);
+        if notify_port.is_null() {
+            eprintln!("Failed to create IONotificationPort");
+            return;
+        }
+
+        let run_loop_source = IONotificationPortGetRunLoopSource(notify_port);
+        if run_loop_source.is_null() {
+            eprintln!("Failed to get run loop source");
+            IONotificationPortDestroy(notify_port);
+            return;
+        }
+
+        CFRunLoopAddSource(
+            CFRunLoopGetCurrent(),
+            run_loop_source as *mut _,
+            kCFRunLoopDefaultMode,
+        );
+
+        let service_name = b"IOPMrootDomain\0";
+        let matching = IOServiceMatching(service_name.as_ptr() as *const i8);
+        if matching.is_null() {
+            eprintln!("Failed to create matching dictionary");
+            IONotificationPortDestroy(notify_port);
+            return;
+        }
+
+        let root_domain = IOServiceGetMatchingService(kIOMasterPortDefault, matching);
+        if root_domain == MACH_PORT_NULL {
+            eprintln!("Failed to find IOPMrootDomain");
+            IONotificationPortDestroy(notify_port);
+            return;
+        }
+
+        let interest_type = b"IOGeneralInterest\0";
+        let mut notification: io_object_t = 0;
+
+        let result = IOServiceAddInterestNotification(
+            notify_port,
+            root_domain,
+            interest_type.as_ptr() as *const i8,
+            clamshell_notification_callback,
+            ptr::null_mut(),
+            &mut notification,
+        );
+
+        IOObjectRelease(root_domain);
+
+        if result != 0 {
+            eprintln!("Failed to add interest notification: {}", result);
+            IONotificationPortDestroy(notify_port);
+            return;
+        }
+
+        CFRunLoopRun();
     });
 }
 
@@ -364,7 +458,10 @@ fn cmd_thermal() -> Result<()> {
 }
 
 fn cmd_daemon(interval: u64) -> Result<()> {
-    eprintln!("Daemon started (interval: {}s, thermal check: 30s)", interval);
+    eprintln!(
+        "Daemon started (interval: {}s, thermal check: 30s)",
+        interval
+    );
 
     let mut thermal_counter = 0u64;
 
@@ -420,9 +517,7 @@ Administrator password required." buttons {"Cancel", "Set Up"} default button "S
 
     let script = r#"do shell script "echo 'y' | /Applications/ClaudeSleepPreventer.app/Contents/MacOS/claude-sleep-preventer install" with administrator privileges"#;
 
-    let install_result = Command::new("osascript")
-        .args(["-e", script])
-        .output()?;
+    let install_result = Command::new("osascript").args(["-e", script]).output()?;
 
     if install_result.status.success() {
         let _ = Command::new("osascript")
@@ -467,9 +562,7 @@ The app will remain in /Applications." buttons {"Cancel", "Uninstall"} default b
 
     let script = r#"do shell script "/Applications/ClaudeSleepPreventer.app/Contents/MacOS/claude-sleep-preventer uninstall" with administrator privileges"#;
 
-    let _ = Command::new("osascript")
-        .args(["-e", script])
-        .output();
+    let _ = Command::new("osascript").args(["-e", script]).output();
 
     let _ = Command::new("osascript")
         .args([
@@ -584,6 +677,82 @@ fn get_instance_items() -> Vec<(u32, u64, f32)> {
     items
 }
 
+struct MenuState {
+    toggle_item: CheckMenuItem,
+    instances_header: MenuItem,
+    instance_items: Vec<(MenuItem, u32)>,
+    thermal_item: MenuItem,
+    uninstall_item: MenuItem,
+    quit_item: MenuItem,
+}
+
+fn build_menu(
+    instances: &[(u32, u64, f32)],
+    sleep_disabled: bool,
+    thermal: bool,
+) -> (Menu, MenuState) {
+    let menu = Menu::new();
+
+    let toggle_item = CheckMenuItem::new("Sleep Prevention", true, sleep_disabled, None);
+    menu.append(&toggle_item).unwrap();
+
+    menu.append(&PredefinedMenuItem::separator()).unwrap();
+
+    let instances_header = MenuItem::new(
+        if instances.is_empty() {
+            "No Active Instances"
+        } else {
+            "Active Instances"
+        },
+        false,
+        None,
+    );
+    menu.append(&instances_header).unwrap();
+
+    let mut instance_items: Vec<(MenuItem, u32)> = Vec::new();
+    for (pid, age, cpu) in instances {
+        let item = MenuItem::new(
+            &format!("  PID {} - {}s - {:.1}%", pid, age, cpu),
+            true,
+            None,
+        );
+        menu.append(&item).unwrap();
+        instance_items.push((item, *pid));
+    }
+
+    menu.append(&PredefinedMenuItem::separator()).unwrap();
+
+    let thermal_item = MenuItem::new(
+        if thermal {
+            "Thermal: WARNING!"
+        } else {
+            "Thermal: OK"
+        },
+        false,
+        None,
+    );
+    menu.append(&thermal_item).unwrap();
+
+    menu.append(&PredefinedMenuItem::separator()).unwrap();
+
+    let uninstall_item = MenuItem::new("Uninstall...", true, None);
+    let quit_item = MenuItem::new("Quit", true, None);
+    menu.append(&uninstall_item).unwrap();
+    menu.append(&quit_item).unwrap();
+
+    (
+        menu,
+        MenuState {
+            toggle_item,
+            instances_header,
+            instance_items,
+            thermal_item,
+            uninstall_item,
+            quit_item,
+        },
+    )
+}
+
 fn cmd_menubar() -> Result<()> {
     if !is_installed() {
         run_first_time_setup()?;
@@ -595,133 +764,105 @@ fn cmd_menubar() -> Result<()> {
     let mut event_loop = EventLoopBuilder::new().build();
     event_loop.set_activation_policy(ActivationPolicy::Accessory);
 
-    let count = count_active_pids();
-    let sleep_disabled = is_sleep_disabled();
-
-    let menu = Menu::new();
-
-    let toggle_item = CheckMenuItem::new("Sleep Prevention", true, sleep_disabled, None);
-    menu.append(&toggle_item)?;
-
-    let sep1 = PredefinedMenuItem::separator();
-    menu.append(&sep1)?;
-
     let initial_instances = get_instance_items();
-    let instances_header = MenuItem::new(
-        if initial_instances.is_empty() { "No Active Instances" } else { "Active Instances" },
-        false,
-        None,
-    );
-    menu.append(&instances_header)?;
+    let sleep_disabled = is_sleep_disabled();
+    let thermal = check_thermal_warning();
 
-    let mut instance_menu_items: Vec<(MenuItem, u32)> = Vec::new();
-    for (pid, age, cpu) in &initial_instances {
-        let item = MenuItem::new(&format!("  PID {} - {}s - {:.1}%", pid, age, cpu), true, None);
-        menu.append(&item)?;
-        instance_menu_items.push((item, *pid));
-    }
+    let (menu, mut state) = build_menu(&initial_instances, sleep_disabled, thermal);
 
-    let sep2 = PredefinedMenuItem::separator();
-    menu.append(&sep2)?;
-
-    let thermal_item = MenuItem::new(
-        if check_thermal_warning() { "Thermal: WARNING!" } else { "Thermal: OK" },
-        false,
-        None,
-    );
-    menu.append(&thermal_item)?;
-
-    let sep3 = PredefinedMenuItem::separator();
-    menu.append(&sep3)?;
-
-    let uninstall_item = MenuItem::new("Uninstall...", true, None);
-    let quit_item = MenuItem::new("Quit", true, None);
-    menu.append(&uninstall_item)?;
-    menu.append(&quit_item)?;
-
-    let _tray = TrayIconBuilder::new()
+    let tray = TrayIconBuilder::new()
         .with_menu(Box::new(menu))
-        .with_title(&create_tray_title(count, sleep_disabled))
+        .with_title(&create_tray_title(initial_instances.len(), sleep_disabled))
         .with_tooltip("Claude Code Sleep Preventer")
         .build()?;
 
     let menu_channel = MenuEvent::receiver();
-    let toggle_id = toggle_item.id().clone();
-    let uninstall_id = uninstall_item.id().clone();
-    let quit_id = quit_item.id().clone();
+
+    start_clamshell_notifications();
 
     std::thread::spawn(|| {
-        let mut thermal_counter = 0;
-        let mut lid_was_closed = false;
+        let mut tick_counter = 0u64;
 
         loop {
-            std::thread::sleep(Duration::from_secs(10));
-            let _ = cmd_cleanup();
+            std::thread::sleep(Duration::from_millis(100));
+            tick_counter += 1;
 
-            thermal_counter += 1;
-            if thermal_counter >= 3 {
-                thermal_counter = 0;
+            if LID_JUST_CLOSED.swap(false, Ordering::SeqCst) {
+                let active = count_active_pids();
+                if active > 0 {
+                    play_lid_close_sound();
+                }
+            }
+
+            if tick_counter % 100 == 0 {
+                let _ = cmd_cleanup();
+            }
+
+            if tick_counter % 300 == 0 {
                 if check_thermal_warning() {
                     let _ = cmd_reset();
                 }
             }
-
-            let lid_closed = is_lid_closed();
-            let active = count_active_pids();
-
-            if !lid_was_closed && lid_closed && active > 0 {
-                play_lid_close_sound();
-            }
-            lid_was_closed = lid_closed;
         }
     });
 
     let mut last_update = std::time::Instant::now() - Duration::from_secs(10);
+    let mut last_instance_count = initial_instances.len();
 
     event_loop.run(move |_event, _, control_flow| {
-        *control_flow = ControlFlow::WaitUntil(std::time::Instant::now() + Duration::from_secs(10));
+        *control_flow = ControlFlow::WaitUntil(std::time::Instant::now() + Duration::from_secs(2));
 
-        if last_update.elapsed() >= Duration::from_secs(10) {
+        if last_update.elapsed() >= Duration::from_secs(2) {
             last_update = std::time::Instant::now();
 
-            let count = count_active_pids();
+            let instances = get_instance_items();
             let sleep_disabled = is_sleep_disabled();
             let thermal = check_thermal_warning();
 
-            toggle_item.set_checked(sleep_disabled);
-            thermal_item.set_text(if thermal { "Thermal: WARNING!" } else { "Thermal: OK" });
-            _tray.set_title(Some(&create_tray_title(count, sleep_disabled)));
+            tray.set_title(Some(&create_tray_title(instances.len(), sleep_disabled)));
 
-            let instances = get_instance_items();
-            instances_header.set_text(if instances.is_empty() { "No Active Instances" } else { "Active Instances" });
-            for (i, (item, stored_pid)) in instance_menu_items.iter_mut().enumerate() {
-                if i < instances.len() {
-                    let (pid, age, cpu) = instances[i];
-                    item.set_text(&format!("  PID {} - {}s - {:.1}%", pid, age, cpu));
-                    item.set_enabled(true);
-                    *stored_pid = pid;
+            if instances.len() != last_instance_count {
+                last_instance_count = instances.len();
+                let (new_menu, new_state) = build_menu(&instances, sleep_disabled, thermal);
+                tray.set_menu(Some(Box::new(new_menu)));
+                state = new_state;
+            } else {
+                state.toggle_item.set_checked(sleep_disabled);
+                state.thermal_item.set_text(if thermal {
+                    "Thermal: WARNING!"
                 } else {
-                    item.set_text("");
-                    item.set_enabled(false);
-                    *stored_pid = 0;
+                    "Thermal: OK"
+                });
+                state.instances_header.set_text(if instances.is_empty() {
+                    "No Active Instances"
+                } else {
+                    "Active Instances"
+                });
+                for (i, (item, stored_pid)) in state.instance_items.iter_mut().enumerate() {
+                    if i < instances.len() {
+                        let (pid, age, cpu) = instances[i];
+                        item.set_text(&format!("  PID {} - {}s - {:.1}%", pid, age, cpu));
+                        *stored_pid = pid;
+                    }
                 }
             }
         }
 
         if let Ok(event) = menu_channel.try_recv() {
-            if event.id == toggle_id {
-                if toggle_item.is_checked() {
+            if event.id == state.toggle_item.id() {
+                if state.toggle_item.is_checked() {
                     let _ = cmd_reset();
                 } else {
                     let _ = set_sleep_disabled(true);
                 }
-            } else if event.id == uninstall_id {
+            } else if event.id == state.uninstall_item.id() {
                 let _ = run_uninstall_flow();
                 *control_flow = ControlFlow::Exit;
-            } else if event.id == quit_id {
+            } else if event.id == state.quit_item.id() {
+                let _ = set_sleep_disabled(false);
                 *control_flow = ControlFlow::Exit;
             } else {
-                for (item, pid) in &instance_menu_items {
+                for (item, pid) in &state.instance_items {
                     if event.id == item.id() && *pid > 0 {
                         focus_terminal_by_pid(*pid);
                         break;
@@ -737,7 +878,10 @@ fn ask_yes_no(prompt: &str) -> bool {
     print!("{} [Y/n]: ", prompt);
     let _ = io::Write::flush(&mut io::stdout());
     let stdin = io::stdin();
-    let answer = stdin.lock().lines().next()
+    let answer = stdin
+        .lock()
+        .lines()
+        .next()
         .and_then(|l| l.ok())
         .unwrap_or_default()
         .trim()
@@ -754,8 +898,14 @@ fn cmd_install() -> Result<()> {
     fs::create_dir_all(&hooks_dir)?;
 
     let app_binary = "/Applications/ClaudeSleepPreventer.app/Contents/MacOS/claude-sleep-preventer";
-    let prevent_script = format!("#!/bin/bash\n[ -x \"{}\" ] && \"{}\" start 2>/dev/null || true\n", app_binary, app_binary);
-    let allow_script = format!("#!/bin/bash\n[ -x \"{}\" ] && \"{}\" stop 2>/dev/null || true\n", app_binary, app_binary);
+    let prevent_script = format!(
+        "#!/bin/bash\n[ -x \"{}\" ] && \"{}\" start 2>/dev/null || true\n",
+        app_binary, app_binary
+    );
+    let allow_script = format!(
+        "#!/bin/bash\n[ -x \"{}\" ] && \"{}\" stop 2>/dev/null || true\n",
+        app_binary, app_binary
+    );
 
     fs::write(hooks_dir.join("prevent-sleep.sh"), prevent_script)?;
     fs::write(hooks_dir.join("allow-sleep.sh"), allow_script)?;
@@ -763,8 +913,14 @@ fn cmd_install() -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(hooks_dir.join("prevent-sleep.sh"), fs::Permissions::from_mode(0o755))?;
-        fs::set_permissions(hooks_dir.join("allow-sleep.sh"), fs::Permissions::from_mode(0o755))?;
+        fs::set_permissions(
+            hooks_dir.join("prevent-sleep.sh"),
+            fs::Permissions::from_mode(0o755),
+        )?;
+        fs::set_permissions(
+            hooks_dir.join("allow-sleep.sh"),
+            fs::Permissions::from_mode(0o755),
+        )?;
     }
 
     println!("Setting up passwordless sudo for pmset...");
@@ -811,8 +967,12 @@ fn cmd_install() -> Result<()> {
         fs::write(&settings_file, serde_json::to_string_pretty(&parsed)?)?;
     }
 
-    Command::new("sudo").args(["pmset", "-a", "sleep", "5"]).output()?;
-    Command::new("sudo").args(["pmset", "-a", "disablesleep", "0"]).output()?;
+    Command::new("sudo")
+        .args(["pmset", "-a", "sleep", "5"])
+        .output()?;
+    Command::new("sudo")
+        .args(["pmset", "-a", "disablesleep", "0"])
+        .output()?;
 
     println!();
     if ask_yes_no("Launch menu bar app at login?") {
@@ -915,9 +1075,7 @@ fn cmd_debug() -> Result<()> {
     }
 
     println!("\nps command:");
-    let output = Command::new("ps")
-        .args(["-eo", "pid,comm"])
-        .output()?;
+    let output = Command::new("ps").args(["-eo", "pid,comm"]).output()?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     for line in stdout.lines() {
         if line.to_lowercase().contains("claude") {
