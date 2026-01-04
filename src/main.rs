@@ -625,7 +625,7 @@ fn focus_terminal_by_tty(tty: &str) {
         }
     }
 
-    // Try iTerm2
+    // Try iTerm2 - double activate to ensure space switch
     let iterm_script = format!(
         r#"
         tell application "iTerm2"
@@ -636,6 +636,8 @@ fn focus_terminal_by_tty(tty: &str) {
                     set sessionList to every session of t
                     repeat with s in sessionList
                         if tty of s is "{}" then
+                            activate
+                            delay 0.1
                             select w
                             select t
                             select s
