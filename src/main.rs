@@ -1,7 +1,15 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use core_foundation::base::{kCFAllocatorDefault, TCFType};
+use core_foundation::boolean::CFBoolean;
 use core_foundation::runloop::{
     kCFRunLoopDefaultMode, CFRunLoopAddSource, CFRunLoopGetCurrent, CFRunLoopRun,
+};
+use core_foundation::string::CFString;
+use core_foundation::string::CFStringRef;
+use global_hotkey::{
+    hotkey::{Code, HotKey, Modifiers},
+    GlobalHotKeyEvent, GlobalHotKeyManager,
 };
 use io_kit_sys::types::*;
 use io_kit_sys::*;
@@ -11,9 +19,30 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
 use std::ptr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::time::Duration;
 use sysinfo::System;
+
+#[link(name = "IOKit", kind = "framework")]
+extern "C" {
+    fn IOPMAssertionCreateWithName(
+        assertion_type: CFStringRef,
+        assertion_level: u32,
+        assertion_name: CFStringRef,
+        assertion_id: *mut u32,
+    ) -> i32;
+    fn IOPMAssertionRelease(assertion_id: u32) -> i32;
+}
+
+#[link(name = "CoreGraphics", kind = "framework")]
+extern "C" {
+    fn CGEventSourceFlagsState(stateID: i32) -> u64;
+}
+
+const CG_EVENT_SOURCE_STATE_COMBINED: i32 = 0;
+const CG_EVENT_FLAG_MASK_ALTERNATE: u64 = 0x00080000;
+
+const IOPM_ASSERTION_LEVEL_ON: u32 = 255;
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
 use tao::platform::macos::{ActivationPolicy, EventLoopExtMacOS};
 use tray_icon::{
@@ -23,6 +52,10 @@ use tray_icon::{
 
 static LID_JUST_CLOSED: AtomicBool = AtomicBool::new(false);
 static LID_WAS_CLOSED: AtomicBool = AtomicBool::new(false);
+static CURRENT_PID_INDEX: AtomicUsize = AtomicUsize::new(0);
+static CURRENT_INACTIVE_INDEX: AtomicUsize = AtomicUsize::new(0);
+static CURRENT_ASSERTION_ID: AtomicU32 = AtomicU32::new(0);
+static MANUAL_SLEEP_PREVENTION: AtomicBool = AtomicBool::new(false);
 
 const PIDS_DIR: &str = "/tmp/claude_working_pids";
 const IDLE_TIMEOUT_SECS: u64 = 30;
@@ -150,14 +183,120 @@ fn set_sleep_disabled(disabled: bool) -> Result<()> {
     Ok(())
 }
 
+fn create_sleep_assertion() -> bool {
+    let current = CURRENT_ASSERTION_ID.load(Ordering::SeqCst);
+    if current != 0 {
+        return true;
+    }
+
+    unsafe {
+        let assertion_type = CFString::new("PreventUserIdleSystemSleep");
+        let assertion_name = CFString::new("Claude Code Sleep Preventer");
+        let mut assertion_id: u32 = 0;
+
+        let result = IOPMAssertionCreateWithName(
+            assertion_type.as_concrete_TypeRef(),
+            IOPM_ASSERTION_LEVEL_ON,
+            assertion_name.as_concrete_TypeRef(),
+            &mut assertion_id,
+        );
+
+        if result == 0 {
+            CURRENT_ASSERTION_ID.store(assertion_id, Ordering::SeqCst);
+            true
+        } else {
+            false
+        }
+    }
+}
+
+fn release_sleep_assertion() {
+    let assertion_id = CURRENT_ASSERTION_ID.swap(0, Ordering::SeqCst);
+    if assertion_id != 0 {
+        unsafe {
+            IOPMAssertionRelease(assertion_id);
+        }
+    }
+}
+
+fn has_active_assertion() -> bool {
+    CURRENT_ASSERTION_ID.load(Ordering::SeqCst) != 0
+}
+
+fn menubar_sync_sleep() {
+    let manual_enabled = MANUAL_SLEEP_PREVENTION.load(Ordering::SeqCst);
+    let has_assertion = has_active_assertion();
+
+    if manual_enabled && !has_assertion {
+        create_sleep_assertion();
+    } else if !manual_enabled && has_assertion {
+        release_sleep_assertion();
+        if is_lid_closed() && count_active_pids() == 0 {
+            force_sleep_now();
+        }
+    }
+}
+
+fn cleanup_stale_pids() {
+    if let Ok(entries) = fs::read_dir(PIDS_DIR) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            let pid: u32 = match entry.file_name().to_string_lossy().parse() {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+
+            let path = entry.path();
+
+            if !is_process_alive(pid) {
+                let _ = fs::remove_file(&path);
+                continue;
+            }
+
+            let age = get_file_age(&path).unwrap_or(0);
+            if age >= IDLE_TIMEOUT_SECS {
+                let cpu = get_process_cpu(pid);
+                if cpu < IDLE_CPU_THRESHOLD {
+                    let _ = fs::remove_file(&path);
+                }
+            }
+        }
+    }
+}
+
 fn is_sleep_disabled() -> bool {
-    Command::new("pmset")
-        .arg("-g")
-        .output()
-        .ok()
-        .and_then(|output| String::from_utf8(output.stdout).ok())
-        .map(|s| s.contains("SleepDisabled\t\t1"))
-        .unwrap_or(false)
+    if has_active_assertion() {
+        return true;
+    }
+
+    unsafe {
+        let service_name = b"IOPMrootDomain\0";
+        let matching = IOServiceMatching(service_name.as_ptr() as *const i8);
+        if matching.is_null() {
+            return false;
+        }
+
+        let root_domain = IOServiceGetMatchingService(kIOMasterPortDefault, matching);
+        if root_domain == MACH_PORT_NULL {
+            return false;
+        }
+
+        let key = CFString::new("SleepDisabled");
+        let property = IORegistryEntryCreateCFProperty(
+            root_domain,
+            key.as_concrete_TypeRef(),
+            kCFAllocatorDefault,
+            0,
+        );
+
+        IOObjectRelease(root_domain);
+
+        if property.is_null() {
+            return false;
+        }
+
+        let result = CFBoolean::wrap_under_create_rule(property as _).into();
+        result
+    }
 }
 
 fn check_thermal_warning() -> bool {
@@ -173,6 +312,45 @@ fn check_thermal_warning() -> bool {
         .unwrap_or(false)
 }
 
+fn get_process_cwd(pid: u32) -> Option<String> {
+    Command::new("lsof")
+        .args(["-a", "-p", &pid.to_string(), "-d", "cwd", "-Fn"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .and_then(|s| {
+            s.lines()
+                .find(|l| l.starts_with('n'))
+                .map(|l| l[1..].to_string())
+        })
+}
+
+fn get_git_branch(path: &str) -> Option<String> {
+    Command::new("git")
+        .args(["-C", path, "branch", "--show-current"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn format_process_location(pid: u32) -> String {
+    get_process_cwd(pid)
+        .map(|cwd| {
+            let dir_name = std::path::Path::new(&cwd)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| cwd.clone());
+            match get_git_branch(&cwd) {
+                Some(branch) => format!("{} git:({})", dir_name, branch),
+                None => dir_name,
+            }
+        })
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
 fn cmd_start() -> Result<()> {
     ensure_pids_dir()?;
 
@@ -180,10 +358,6 @@ fn cmd_start() -> Result<()> {
     let pid_file = get_pid_file(claude_pid);
 
     fs::write(&pid_file, "working").context("Failed to write PID file")?;
-
-    if !is_sleep_disabled() {
-        set_sleep_disabled(true)?;
-    }
 
     Ok(())
 }
@@ -193,10 +367,6 @@ fn cmd_stop() -> Result<()> {
     let pid_file = get_pid_file(claude_pid);
 
     let _ = fs::remove_file(&pid_file);
-
-    if count_active_pids() == 0 {
-        enable_sleep_and_trigger_if_lid_closed()?;
-    }
 
     Ok(())
 }
@@ -209,6 +379,36 @@ fn count_claude_processes() -> usize {
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .map(|s| s.lines().filter(|l| l.trim() == "claude").count())
         .unwrap_or(0)
+}
+
+fn get_all_claude_pids() -> Vec<u32> {
+    Command::new("ps")
+        .args(["-eo", "pid,comm"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| {
+            s.lines()
+                .filter_map(|l| {
+                    let parts: Vec<&str> = l.trim().split_whitespace().collect();
+                    if parts.len() >= 2 && parts[1] == "claude" {
+                        parts[0].parse().ok()
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn get_inactive_claude_pids() -> Vec<u32> {
+    let all_pids = get_all_claude_pids();
+    let active_pids: Vec<u32> = get_instance_items().iter().map(|(pid, _, _, _)| *pid).collect();
+    all_pids
+        .into_iter()
+        .filter(|pid| !active_pids.contains(pid))
+        .collect()
 }
 
 fn cmd_status() -> Result<()> {
@@ -272,21 +472,39 @@ fn get_process_cpu(pid: u32) -> f32 {
 }
 
 fn is_process_alive(pid: u32) -> bool {
-    Command::new("ps")
-        .args(["-p", &pid.to_string()])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    unsafe { libc::kill(pid as i32, 0) == 0 }
 }
 
 fn is_lid_closed() -> bool {
-    Command::new("ioreg")
-        .args(["-r", "-k", "AppleClamshellState", "-d", "4"])
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.contains("\"AppleClamshellState\" = Yes"))
-        .unwrap_or(false)
+    unsafe {
+        let service_name = b"IOPMrootDomain\0";
+        let matching = IOServiceMatching(service_name.as_ptr() as *const i8);
+        if matching.is_null() {
+            return false;
+        }
+
+        let root_domain = IOServiceGetMatchingService(kIOMasterPortDefault, matching);
+        if root_domain == MACH_PORT_NULL {
+            return false;
+        }
+
+        let key = CFString::new("AppleClamshellState");
+        let property = IORegistryEntryCreateCFProperty(
+            root_domain,
+            key.as_concrete_TypeRef(),
+            kCFAllocatorDefault,
+            0,
+        );
+
+        IOObjectRelease(root_domain);
+
+        if property.is_null() {
+            return false;
+        }
+
+        let result = CFBoolean::wrap_under_create_rule(property as _).into();
+        result
+    }
 }
 
 fn force_sleep_now() {
@@ -483,9 +701,13 @@ fn cmd_daemon(interval: u64) -> Result<()> {
     }
 }
 
-fn create_tray_title(count: usize, sleep_disabled: bool) -> String {
-    if count > 0 || sleep_disabled {
-        format!("☕ {}", count)
+fn create_tray_title(count: usize, manual_enabled: bool) -> String {
+    if manual_enabled {
+        if count > 0 {
+            format!("☕ {}", count)
+        } else {
+            "☕".to_string()
+        }
     } else {
         "😴".to_string()
     }
@@ -664,7 +886,7 @@ fn focus_terminal_by_pid(pid: u32) {
     }
 }
 
-fn get_instance_items() -> Vec<(u32, u64, f32)> {
+fn get_instance_items() -> Vec<(u32, u64, f32, String)> {
     let mut items = Vec::new();
     if let Ok(entries) = fs::read_dir(PIDS_DIR) {
         for entry in entries.filter_map(|e| e.ok()) {
@@ -672,30 +894,60 @@ fn get_instance_items() -> Vec<(u32, u64, f32)> {
             if pid > 0 {
                 let age = get_file_age(&entry.path()).unwrap_or(0);
                 let cpu = get_process_cpu(pid);
-                items.push((pid, age, cpu));
+                let location = format_process_location(pid);
+                items.push((pid, age, cpu, location));
             }
         }
     }
     items
 }
 
+fn is_option_key_pressed() -> bool {
+    unsafe {
+        let flags = CGEventSourceFlagsState(CG_EVENT_SOURCE_STATE_COMBINED);
+        (flags & CG_EVENT_FLAG_MASK_ALTERNATE) != 0
+    }
+}
+
+fn kill_inactive_claudes() {
+    let inactive = get_inactive_claude_pids();
+    for pid in inactive {
+        unsafe {
+            libc::kill(pid as i32, libc::SIGTERM);
+        }
+    }
+}
+
 struct MenuState {
     toggle_item: CheckMenuItem,
     instances_header: MenuItem,
     instance_items: Vec<(MenuItem, u32)>,
+    inactive_header: MenuItem,
+    inactive_items: Vec<(MenuItem, u32)>,
+    kill_inactive_item: MenuItem,
     thermal_item: MenuItem,
     uninstall_item: MenuItem,
     quit_item: MenuItem,
 }
 
 fn build_menu(
-    instances: &[(u32, u64, f32)],
-    sleep_disabled: bool,
+    instances: &[(u32, u64, f32, String)],
+    inactive: &[u32],
+    manual_enabled: bool,
     thermal: bool,
 ) -> (Menu, MenuState) {
     let menu = Menu::new();
 
-    let toggle_item = CheckMenuItem::new("Sleep Prevention", true, sleep_disabled, None);
+    let toggle_text = if manual_enabled {
+        if instances.is_empty() {
+            "Sleep Prevention (Idle)"
+        } else {
+            "Sleep Prevention (Working)"
+        }
+    } else {
+        "Sleep Prevention"
+    };
+    let toggle_item = CheckMenuItem::new(toggle_text, true, manual_enabled, None);
     menu.append(&toggle_item).unwrap();
 
     menu.append(&PredefinedMenuItem::separator()).unwrap();
@@ -712,15 +964,39 @@ fn build_menu(
     menu.append(&instances_header).unwrap();
 
     let mut instance_items: Vec<(MenuItem, u32)> = Vec::new();
-    for (pid, age, cpu) in instances {
+    for (pid, age, cpu, location) in instances {
         let item = MenuItem::new(
-            &format!("  PID {} - {}s - {:.1}%", pid, age, cpu),
+            &format!("  {} - {}s - {:.1}%", location, age, cpu),
             true,
             None,
         );
         menu.append(&item).unwrap();
         instance_items.push((item, *pid));
     }
+
+    menu.append(&PredefinedMenuItem::separator()).unwrap();
+
+    let inactive_header = MenuItem::new(
+        if inactive.is_empty() {
+            "No Inactive Instances"
+        } else {
+            "Inactive Instances"
+        },
+        false,
+        None,
+    );
+    menu.append(&inactive_header).unwrap();
+
+    let mut inactive_items: Vec<(MenuItem, u32)> = Vec::new();
+    for pid in inactive {
+        let location = format_process_location(*pid);
+        let item = MenuItem::new(&format!("  {} (⌥ kill)", location), true, None);
+        menu.append(&item).unwrap();
+        inactive_items.push((item, *pid));
+    }
+
+    let kill_inactive_item = MenuItem::new("Kill All Inactive", !inactive.is_empty(), None);
+    menu.append(&kill_inactive_item).unwrap();
 
     menu.append(&PredefinedMenuItem::separator()).unwrap();
 
@@ -748,6 +1024,9 @@ fn build_menu(
             toggle_item,
             instances_header,
             instance_items,
+            inactive_header,
+            inactive_items,
+            kill_inactive_item,
             thermal_item,
             uninstall_item,
             quit_item,
@@ -767,18 +1046,35 @@ fn cmd_menubar() -> Result<()> {
     event_loop.set_activation_policy(ActivationPolicy::Accessory);
 
     let initial_instances = get_instance_items();
-    let sleep_disabled = is_sleep_disabled();
+    let initial_inactive = get_inactive_claude_pids();
+    let manual_enabled = MANUAL_SLEEP_PREVENTION.load(Ordering::SeqCst);
     let thermal = check_thermal_warning();
 
-    let (menu, mut state) = build_menu(&initial_instances, sleep_disabled, thermal);
+    let (menu, mut state) = build_menu(&initial_instances, &initial_inactive, manual_enabled, thermal);
 
     let tray = TrayIconBuilder::new()
         .with_menu(Box::new(menu))
-        .with_title(&create_tray_title(initial_instances.len(), sleep_disabled))
+        .with_title(&create_tray_title(initial_instances.len(), manual_enabled))
         .with_tooltip("Claude Code Sleep Preventer")
         .build()?;
 
     let menu_channel = MenuEvent::receiver();
+
+    // Register global hotkeys
+    let hotkey_manager = GlobalHotKeyManager::new().unwrap();
+    let hotkey_active = HotKey::new(
+        Some(Modifiers::CONTROL | Modifiers::ALT | Modifiers::SUPER),
+        Code::KeyJ,
+    );
+    let hotkey_inactive = HotKey::new(
+        Some(Modifiers::CONTROL | Modifiers::ALT | Modifiers::SUPER),
+        Code::KeyL,
+    );
+    let hotkey_active_id = hotkey_active.id();
+    let hotkey_inactive_id = hotkey_inactive.id();
+    hotkey_manager.register(hotkey_active).unwrap();
+    hotkey_manager.register(hotkey_inactive).unwrap();
+    let hotkey_receiver = GlobalHotKeyEvent::receiver();
 
     start_clamshell_notifications();
 
@@ -797,12 +1093,13 @@ fn cmd_menubar() -> Result<()> {
             }
 
             if tick_counter % 100 == 0 {
-                let _ = cmd_cleanup();
+                cleanup_stale_pids();
+                menubar_sync_sleep();
             }
 
             if tick_counter % 300 == 0 {
                 if check_thermal_warning() {
-                    let _ = cmd_reset();
+                    release_sleep_assertion();
                 }
             }
         }
@@ -810,6 +1107,7 @@ fn cmd_menubar() -> Result<()> {
 
     let mut last_update = std::time::Instant::now() - Duration::from_secs(10);
     let mut last_instance_count = initial_instances.len();
+    let mut last_inactive_count = initial_inactive.len();
 
     event_loop.run(move |_event, _, control_flow| {
         *control_flow = ControlFlow::WaitUntil(std::time::Instant::now() + Duration::from_secs(2));
@@ -818,18 +1116,30 @@ fn cmd_menubar() -> Result<()> {
             last_update = std::time::Instant::now();
 
             let instances = get_instance_items();
-            let sleep_disabled = is_sleep_disabled();
+            let inactive = get_inactive_claude_pids();
+            let manual_enabled = MANUAL_SLEEP_PREVENTION.load(Ordering::SeqCst);
             let thermal = check_thermal_warning();
 
-            tray.set_title(Some(&create_tray_title(instances.len(), sleep_disabled)));
+            tray.set_title(Some(&create_tray_title(instances.len(), manual_enabled)));
 
-            if instances.len() != last_instance_count {
+            if instances.len() != last_instance_count || inactive.len() != last_inactive_count {
                 last_instance_count = instances.len();
-                let (new_menu, new_state) = build_menu(&instances, sleep_disabled, thermal);
+                last_inactive_count = inactive.len();
+                let (new_menu, new_state) = build_menu(&instances, &inactive, manual_enabled, thermal);
                 tray.set_menu(Some(Box::new(new_menu)));
                 state = new_state;
             } else {
-                state.toggle_item.set_checked(sleep_disabled);
+                state.toggle_item.set_checked(manual_enabled);
+                let toggle_text = if manual_enabled {
+                    if instances.is_empty() {
+                        "Sleep Prevention (Idle)"
+                    } else {
+                        "Sleep Prevention (Working)"
+                    }
+                } else {
+                    "Sleep Prevention"
+                };
+                state.toggle_item.set_text(toggle_text);
                 state.thermal_item.set_text(if thermal {
                     "Thermal: WARNING!"
                 } else {
@@ -842,32 +1152,70 @@ fn cmd_menubar() -> Result<()> {
                 });
                 for (i, (item, stored_pid)) in state.instance_items.iter_mut().enumerate() {
                     if i < instances.len() {
-                        let (pid, age, cpu) = instances[i];
-                        item.set_text(&format!("  PID {} - {}s - {:.1}%", pid, age, cpu));
-                        *stored_pid = pid;
+                        let (pid, age, cpu, location) = &instances[i];
+                        item.set_text(&format!("  {} - {}s - {:.1}%", location, age, cpu));
+                        *stored_pid = *pid;
                     }
                 }
+                state.inactive_header.set_text(if inactive.is_empty() {
+                    "No Inactive Instances"
+                } else {
+                    "Inactive Instances"
+                });
             }
         }
 
         if let Ok(event) = menu_channel.try_recv() {
             if event.id == state.toggle_item.id() {
-                if state.toggle_item.is_checked() {
-                    let _ = cmd_reset();
+                let new_state = !MANUAL_SLEEP_PREVENTION.load(Ordering::SeqCst);
+                MANUAL_SLEEP_PREVENTION.store(new_state, Ordering::SeqCst);
+                if new_state {
+                    create_sleep_assertion();
                 } else {
-                    let _ = set_sleep_disabled(true);
+                    release_sleep_assertion();
                 }
+            } else if event.id == state.kill_inactive_item.id() {
+                kill_inactive_claudes();
             } else if event.id == state.uninstall_item.id() {
                 let _ = run_uninstall_flow();
                 *control_flow = ControlFlow::Exit;
             } else if event.id == state.quit_item.id() {
-                let _ = set_sleep_disabled(false);
+                release_sleep_assertion();
                 *control_flow = ControlFlow::Exit;
             } else {
                 for (item, pid) in &state.instance_items {
                     if event.id == item.id() && *pid > 0 {
                         focus_terminal_by_pid(*pid);
                         break;
+                    }
+                }
+                for (item, pid) in &state.inactive_items {
+                    if event.id == item.id() && *pid > 0 {
+                        if is_option_key_pressed() {
+                            unsafe { libc::kill(*pid as i32, libc::SIGTERM); }
+                        } else {
+                            focus_terminal_by_pid(*pid);
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Handle global hotkeys
+        if let Ok(event) = hotkey_receiver.try_recv() {
+            if event.state == global_hotkey::HotKeyState::Pressed {
+                if event.id == hotkey_active_id {
+                    let instances = get_instance_items();
+                    if !instances.is_empty() {
+                        let idx = CURRENT_PID_INDEX.fetch_add(1, Ordering::SeqCst) % instances.len();
+                        focus_terminal_by_pid(instances[idx].0);
+                    }
+                } else if event.id == hotkey_inactive_id {
+                    let inactive = get_inactive_claude_pids();
+                    if !inactive.is_empty() {
+                        let idx = CURRENT_INACTIVE_INDEX.fetch_add(1, Ordering::SeqCst) % inactive.len();
+                        focus_terminal_by_pid(inactive[idx]);
                     }
                 }
             }

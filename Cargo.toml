@@ -1,6 +1,6 @@
 [package]
 name = "claude-sleep-preventer"
-version = "2.2.5"
+version = "2.2.6"
 edition = "2021"
 description = "Keep your Mac awake while Claude Code is working"
 license = "MIT"
@@ -17,6 +17,8 @@ tray-icon = "0.17"
 io-kit-sys = "0.5.0"
 core-foundation = "0.10.1"
 mach2 = "0.6.0"
+global-hotkey = "0.7"
+libc = "0.2"
 
 [profile.release]
 strip = true
