@@ -7,11 +7,32 @@
 ## Release Process
 
 To publish a new version:
-1. Bump version in `Cargo.toml`
+
+1. Bump version in `Cargo.toml` and `Info.plist`
 2. `cargo build --release`
-3. Create app bundle in `target/release/bundle/ClaudeSleepPreventer.app`
-4. Sign: `codesign --force --options runtime --sign "Developer ID Application" target/release/bundle/ClaudeSleepPreventer.app`
-5. Create DMG: `hdiutil create -volname "Claude Sleep Preventer" -srcfolder target/release/bundle/ClaudeSleepPreventer.app -ov -format UDZO ClaudeSleepPreventer-X.X.X.dmg`
+3. Create app bundle structure:
+   ```bash
+   rm -rf target/release/bundle
+   mkdir -p target/release/bundle/ClaudeSleepPreventer.app/Contents/{MacOS,Resources}
+   cp target/release/claude-sleep-preventer target/release/bundle/ClaudeSleepPreventer.app/Contents/MacOS/
+   cp Info.plist target/release/bundle/ClaudeSleepPreventer.app/Contents/
+   cp AppIcon.icns target/release/bundle/ClaudeSleepPreventer.app/Contents/Resources/
+   cp /tmp/whisper.cpp/build/bin/whisper-cli target/release/bundle/ClaudeSleepPreventer.app/Contents/Resources/
+   ```
+   Note: whisper-cli must be compiled from https://github.com/ggerganov/whisper.cpp
+4. Sign (whisper-cli first, then app):
+   ```bash
+   codesign --force --options runtime --sign "Developer ID Application" target/release/bundle/ClaudeSleepPreventer.app/Contents/Resources/whisper-cli
+   codesign --force --options runtime --sign "Developer ID Application" target/release/bundle/ClaudeSleepPreventer.app
+   ```
+5. Create DMG with Applications symlink:
+   ```bash
+   rm -rf /tmp/dmg-contents
+   mkdir -p /tmp/dmg-contents
+   cp -R target/release/bundle/ClaudeSleepPreventer.app /tmp/dmg-contents/
+   ln -s /Applications /tmp/dmg-contents/Applications
+   hdiutil create -volname "Claude Sleep Preventer" -srcfolder /tmp/dmg-contents -ov -format UDZO ClaudeSleepPreventer-X.X.X.dmg
+   ```
 6. Notarize: `xcrun notarytool submit ClaudeSleepPreventer-X.X.X.dmg --keychain-profile "notary" --wait`
 7. Staple: `xcrun stapler staple ClaudeSleepPreventer-X.X.X.dmg`
 8. Create GitHub release: `gh release create vX.X.X ClaudeSleepPreventer-X.X.X.dmg --title "vX.X.X" --notes "..."`
