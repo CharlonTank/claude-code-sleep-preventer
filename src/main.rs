@@ -55,7 +55,7 @@ static LID_WAS_CLOSED: AtomicBool = AtomicBool::new(false);
 static CURRENT_PID_INDEX: AtomicUsize = AtomicUsize::new(0);
 static CURRENT_INACTIVE_INDEX: AtomicUsize = AtomicUsize::new(0);
 static CURRENT_ASSERTION_ID: AtomicU32 = AtomicU32::new(0);
-static MANUAL_SLEEP_PREVENTION: AtomicBool = AtomicBool::new(false);
+static MANUAL_SLEEP_PREVENTION: AtomicBool = AtomicBool::new(true);
 
 const PIDS_DIR: &str = "/tmp/claude_working_pids";
 const IDLE_TIMEOUT_SECS: u64 = 30;
@@ -225,13 +225,15 @@ fn has_active_assertion() -> bool {
 
 fn menubar_sync_sleep() {
     let manual_enabled = MANUAL_SLEEP_PREVENTION.load(Ordering::SeqCst);
+    let active = count_active_pids();
     let has_assertion = has_active_assertion();
+    let should_prevent = manual_enabled && active > 0;
 
-    if manual_enabled && !has_assertion {
+    if should_prevent && !has_assertion {
         create_sleep_assertion();
-    } else if !manual_enabled && has_assertion {
+    } else if !should_prevent && has_assertion {
         release_sleep_assertion();
-        if is_lid_closed() && count_active_pids() == 0 {
+        if is_lid_closed() {
             force_sleep_now();
         }
     }
@@ -702,12 +704,8 @@ fn cmd_daemon(interval: u64) -> Result<()> {
 }
 
 fn create_tray_title(count: usize, manual_enabled: bool) -> String {
-    if manual_enabled {
-        if count > 0 {
-            format!("☕ {}", count)
-        } else {
-            "☕".to_string()
-        }
+    if manual_enabled && count > 0 {
+        format!("☕ {}", count)
     } else {
         "😴".to_string()
     }
@@ -940,14 +938,14 @@ fn build_menu(
 
     let toggle_text = if manual_enabled {
         if instances.is_empty() {
-            "Sleep Prevention (Idle)"
+            "🔵─⚪ Sleep Prevention (Idle)"
         } else {
-            "Sleep Prevention (Working)"
+            "🔵─⚪ Sleep Prevention (Working)"
         }
     } else {
-        "Sleep Prevention"
+        "⚪─⚫ Sleep Prevention"
     };
-    let toggle_item = CheckMenuItem::new(toggle_text, true, manual_enabled, None);
+    let toggle_item = CheckMenuItem::new(toggle_text, true, false, None);
     menu.append(&toggle_item).unwrap();
 
     menu.append(&PredefinedMenuItem::separator()).unwrap();
@@ -1129,15 +1127,14 @@ fn cmd_menubar() -> Result<()> {
                 tray.set_menu(Some(Box::new(new_menu)));
                 state = new_state;
             } else {
-                state.toggle_item.set_checked(manual_enabled);
                 let toggle_text = if manual_enabled {
                     if instances.is_empty() {
-                        "Sleep Prevention (Idle)"
+                        "🔵─⚪ Sleep Prevention (Idle)"
                     } else {
-                        "Sleep Prevention (Working)"
+                        "🔵─⚪ Sleep Prevention (Working)"
                     }
                 } else {
-                    "Sleep Prevention"
+                    "⚪─⚫ Sleep Prevention"
                 };
                 state.toggle_item.set_text(toggle_text);
                 state.thermal_item.set_text(if thermal {
@@ -1169,11 +1166,7 @@ fn cmd_menubar() -> Result<()> {
             if event.id == state.toggle_item.id() {
                 let new_state = !MANUAL_SLEEP_PREVENTION.load(Ordering::SeqCst);
                 MANUAL_SLEEP_PREVENTION.store(new_state, Ordering::SeqCst);
-                if new_state {
-                    create_sleep_assertion();
-                } else {
-                    release_sleep_assertion();
-                }
+                menubar_sync_sleep();
             } else if event.id == state.kill_inactive_item.id() {
                 kill_inactive_claudes();
             } else if event.id == state.uninstall_item.id() {

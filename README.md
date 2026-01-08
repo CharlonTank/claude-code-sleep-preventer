@@ -7,7 +7,7 @@
 
 <br>
 
-[![Download DMG](https://img.shields.io/badge/Download-DMG%20Installer-blue?style=for-the-badge&logo=apple)](https://github.com/CharlonTank/claude-code-sleep-preventer/releases/latest/download/ClaudeSleepPreventer-2.2.6.dmg)
+[![Download DMG](https://img.shields.io/badge/Download-DMG%20Installer-blue?style=for-the-badge&logo=apple)](https://github.com/CharlonTank/claude-code-sleep-preventer/releases/latest/download/ClaudeSleepPreventer-2.2.7.dmg)
 
 <br>
 
@@ -45,7 +45,7 @@ Install this tool. Now your Mac stays awake while Claude works, even with the li
 
 ### 🍎 Download DMG (Easiest)
 
-1. [Download the latest DMG](https://github.com/CharlonTank/claude-code-sleep-preventer/releases/latest/download/ClaudeSleepPreventer-2.2.6.dmg)
+1. [Download the latest DMG](https://github.com/CharlonTank/claude-code-sleep-preventer/releases/latest/download/ClaudeSleepPreventer-2.2.7.dmg)
 2. Drag `ClaudeSleepPreventer.app` to Applications
 3. Launch the app - it will auto-configure on first run
 4. Restart Claude Code
