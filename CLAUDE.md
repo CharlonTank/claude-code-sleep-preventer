@@ -20,7 +20,14 @@ To publish a new version:
    cp /tmp/whisper.cpp/build/bin/whisper-cli target/release/bundle/ClaudeSleepPreventer.app/Contents/Resources/
    swiftc swift/globe-listener.swift -O -o target/release/bundle/ClaudeSleepPreventer.app/Contents/Resources/globe-listener
    ```
-   Note: whisper-cli must be compiled from https://github.com/ggerganov/whisper.cpp
+   Note: whisper-cli must be compiled statically from https://github.com/ggerganov/whisper.cpp:
+   ```bash
+   cd /tmp && git clone https://github.com/ggerganov/whisper.cpp && cd whisper.cpp
+   mkdir build && cd build
+   cmake .. -DBUILD_SHARED_LIBS=OFF -DGGML_METAL=ON -DCMAKE_BUILD_TYPE=Release
+   make -j8 whisper-cli
+   # Binary is at /tmp/whisper.cpp/build/bin/whisper-cli
+   ```
 4. Sign (all Resources binaries first, then app):
    ```bash
    codesign --force --options runtime --sign "Developer ID Application" target/release/bundle/ClaudeSleepPreventer.app/Contents/Resources/whisper-cli
