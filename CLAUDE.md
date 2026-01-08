@@ -18,11 +18,13 @@ To publish a new version:
    cp Info.plist target/release/bundle/ClaudeSleepPreventer.app/Contents/
    cp AppIcon.icns target/release/bundle/ClaudeSleepPreventer.app/Contents/Resources/
    cp /tmp/whisper.cpp/build/bin/whisper-cli target/release/bundle/ClaudeSleepPreventer.app/Contents/Resources/
+   swiftc swift/globe-listener.swift -O -o target/release/bundle/ClaudeSleepPreventer.app/Contents/Resources/globe-listener
    ```
    Note: whisper-cli must be compiled from https://github.com/ggerganov/whisper.cpp
-4. Sign (whisper-cli first, then app):
+4. Sign (all Resources binaries first, then app):
    ```bash
    codesign --force --options runtime --sign "Developer ID Application" target/release/bundle/ClaudeSleepPreventer.app/Contents/Resources/whisper-cli
+   codesign --force --options runtime --sign "Developer ID Application" target/release/bundle/ClaudeSleepPreventer.app/Contents/Resources/globe-listener
    codesign --force --options runtime --sign "Developer ID Application" target/release/bundle/ClaudeSleepPreventer.app
    ```
 5. Create DMG with Applications symlink:
