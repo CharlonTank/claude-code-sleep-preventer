@@ -1,5 +1,8 @@
+mod dictation;
+
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use dictation::{run_dictation_setup, DictationManager};
 use core_foundation::base::{kCFAllocatorDefault, TCFType};
 use core_foundation::boolean::CFBoolean;
 use core_foundation::runloop::{
@@ -20,6 +23,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::Mutex;
 use std::time::Duration;
 use sysinfo::System;
 
@@ -56,6 +60,8 @@ static CURRENT_PID_INDEX: AtomicUsize = AtomicUsize::new(0);
 static CURRENT_INACTIVE_INDEX: AtomicUsize = AtomicUsize::new(0);
 static CURRENT_ASSERTION_ID: AtomicU32 = AtomicU32::new(0);
 static MANUAL_SLEEP_PREVENTION: AtomicBool = AtomicBool::new(true);
+static LATEST_VERSION: Mutex<Option<String>> = Mutex::new(None);
+static VERSION_CHECK_DONE: AtomicBool = AtomicBool::new(false);
 
 const PIDS_DIR: &str = "/tmp/claude_working_pids";
 const IDLE_TIMEOUT_SECS: u64 = 30;
@@ -711,6 +717,88 @@ fn create_tray_title(count: usize, manual_enabled: bool) -> String {
     }
 }
 
+fn fetch_latest_version() -> Option<String> {
+    // Use GitHub API to get latest release
+    let output = Command::new("curl")
+        .args([
+            "-s",
+            "-H", "Accept: application/vnd.github.v3+json",
+            "https://api.github.com/repos/CharlonTank/claude-code-sleep-preventer/releases/latest"
+        ])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let json_str = String::from_utf8(output.stdout).ok()?;
+
+    // Simple JSON parsing for tag_name
+    // Looking for "tag_name": "vX.X.X"
+    let tag_marker = "\"tag_name\":";
+    let start = json_str.find(tag_marker)? + tag_marker.len();
+    let rest = &json_str[start..];
+    let quote_start = rest.find('"')? + 1;
+    let rest = &rest[quote_start..];
+    let quote_end = rest.find('"')?;
+    let tag = &rest[..quote_end];
+
+    // Remove 'v' prefix if present
+    let version = tag.strip_prefix('v').unwrap_or(tag);
+    Some(version.to_string())
+}
+
+fn start_version_check() {
+    std::thread::spawn(|| {
+        if let Some(latest) = fetch_latest_version() {
+            if let Ok(mut guard) = LATEST_VERSION.lock() {
+                *guard = Some(latest);
+            }
+        }
+        VERSION_CHECK_DONE.store(true, Ordering::SeqCst);
+    });
+}
+
+fn get_cached_latest_version() -> Option<String> {
+    LATEST_VERSION.lock().ok()?.clone()
+}
+
+fn is_update_available() -> Option<bool> {
+    let latest = get_cached_latest_version()?;
+    let current = env!("CARGO_PKG_VERSION");
+    Some(version_compare(&latest, current) > 0)
+}
+
+fn version_compare(a: &str, b: &str) -> i32 {
+    let parse = |s: &str| -> Vec<u32> {
+        s.split('.')
+            .filter_map(|p| p.parse().ok())
+            .collect()
+    };
+
+    let va = parse(a);
+    let vb = parse(b);
+
+    for i in 0..va.len().max(vb.len()) {
+        let pa = va.get(i).copied().unwrap_or(0);
+        let pb = vb.get(i).copied().unwrap_or(0);
+        if pa > pb {
+            return 1;
+        }
+        if pa < pb {
+            return -1;
+        }
+    }
+    0
+}
+
+fn open_releases_page() {
+    let _ = Command::new("open")
+        .arg("https://github.com/CharlonTank/claude-code-sleep-preventer/releases/latest")
+        .spawn();
+}
+
 fn is_installed() -> bool {
     let home = dirs::home_dir().unwrap_or_default();
     home.join(".claude/hooks/prevent-sleep.sh").exists()
@@ -923,7 +1011,10 @@ struct MenuState {
     inactive_header: MenuItem,
     inactive_items: Vec<(MenuItem, u32)>,
     kill_inactive_item: MenuItem,
+    dictation_item: CheckMenuItem,
+    setup_dictation_item: Option<MenuItem>,
     thermal_item: MenuItem,
+    update_item: Option<MenuItem>,
     uninstall_item: MenuItem,
     quit_item: MenuItem,
 }
@@ -933,8 +1024,34 @@ fn build_menu(
     inactive: &[u32],
     manual_enabled: bool,
     thermal: bool,
+    dictation_enabled: bool,
+    dictation_available: bool,
 ) -> (Menu, MenuState) {
     let menu = Menu::new();
+
+    // Version header with status
+    let current_version = env!("CARGO_PKG_VERSION");
+    let version_text = match is_update_available() {
+        Some(true) => {
+            let latest = get_cached_latest_version().unwrap_or_default();
+            format!("CCSP v{} → v{} available", current_version, latest)
+        }
+        Some(false) => format!("CCSP v{} ✓", current_version),
+        None => format!("CCSP v{}", current_version), // Still checking or failed
+    };
+    let version_item = MenuItem::new(&version_text, false, None);
+    menu.append(&version_item).unwrap();
+
+    // Update button (only if update available)
+    let update_item = if is_update_available() == Some(true) {
+        let item = MenuItem::new("⬆️ Download Update", true, None);
+        menu.append(&item).unwrap();
+        Some(item)
+    } else {
+        None
+    };
+
+    menu.append(&PredefinedMenuItem::separator()).unwrap();
 
     let toggle_text = if manual_enabled {
         if instances.is_empty() {
@@ -998,6 +1115,30 @@ fn build_menu(
 
     menu.append(&PredefinedMenuItem::separator()).unwrap();
 
+    // Dictation (Fn+Shift)
+    let dictation_text = if dictation_available {
+        if dictation_enabled {
+            "🎤 Dictation (Fn+Shift)"
+        } else {
+            "🎤 Dictation (Off)"
+        }
+    } else {
+        "🎤 Dictation (Not installed)"
+    };
+    let dictation_item = CheckMenuItem::new(dictation_text, dictation_available, dictation_enabled, None);
+    menu.append(&dictation_item).unwrap();
+
+    // Setup button when dictation not available
+    let setup_dictation_item = if !dictation_available {
+        let item = MenuItem::new("   ↳ Setup Dictation...", true, None);
+        menu.append(&item).unwrap();
+        Some(item)
+    } else {
+        None
+    };
+
+    menu.append(&PredefinedMenuItem::separator()).unwrap();
+
     let thermal_item = MenuItem::new(
         if thermal {
             "Thermal: WARNING!"
@@ -1025,7 +1166,10 @@ fn build_menu(
             inactive_header,
             inactive_items,
             kill_inactive_item,
+            dictation_item,
+            setup_dictation_item,
             thermal_item,
+            update_item,
             uninstall_item,
             quit_item,
         },
@@ -1040,6 +1184,9 @@ fn cmd_menubar() -> Result<()> {
         }
     }
 
+    // Start background version check
+    start_version_check();
+
     let mut event_loop = EventLoopBuilder::new().build();
     event_loop.set_activation_policy(ActivationPolicy::Accessory);
 
@@ -1048,7 +1195,26 @@ fn cmd_menubar() -> Result<()> {
     let manual_enabled = MANUAL_SLEEP_PREVENTION.load(Ordering::SeqCst);
     let thermal = check_thermal_warning();
 
-    let (menu, mut state) = build_menu(&initial_instances, &initial_inactive, manual_enabled, thermal);
+    // Initialize dictation manager
+    let mut dictation_manager = DictationManager::new();
+    let dictation_available = dictation_manager.is_available();
+    let dictation_enabled = dictation_manager.is_enabled();
+
+    // Start dictation if available
+    if dictation_available {
+        if let Err(e) = dictation_manager.start() {
+            eprintln!("[dictation] Failed to start: {}", e);
+        }
+    }
+
+    let (menu, mut state) = build_menu(
+        &initial_instances,
+        &initial_inactive,
+        manual_enabled,
+        thermal,
+        dictation_enabled,
+        dictation_available,
+    );
 
     let tray = TrayIconBuilder::new()
         .with_menu(Box::new(menu))
@@ -1108,7 +1274,11 @@ fn cmd_menubar() -> Result<()> {
     let mut last_inactive_count = initial_inactive.len();
 
     event_loop.run(move |_event, _, control_flow| {
-        *control_flow = ControlFlow::WaitUntil(std::time::Instant::now() + Duration::from_secs(2));
+        // Poll more frequently for dictation updates (100ms), but only update menu every 2s
+        *control_flow = ControlFlow::WaitUntil(std::time::Instant::now() + Duration::from_millis(100));
+
+        // Update dictation manager (handles Fn+Space events)
+        dictation_manager.update();
 
         if last_update.elapsed() >= Duration::from_secs(2) {
             last_update = std::time::Instant::now();
@@ -1123,7 +1293,14 @@ fn cmd_menubar() -> Result<()> {
             if instances.len() != last_instance_count || inactive.len() != last_inactive_count {
                 last_instance_count = instances.len();
                 last_inactive_count = inactive.len();
-                let (new_menu, new_state) = build_menu(&instances, &inactive, manual_enabled, thermal);
+                let (new_menu, new_state) = build_menu(
+                    &instances,
+                    &inactive,
+                    manual_enabled,
+                    thermal,
+                    dictation_manager.is_enabled(),
+                    dictation_manager.is_available(),
+                );
                 tray.set_menu(Some(Box::new(new_menu)));
                 state = new_state;
             } else {
@@ -1169,6 +1346,34 @@ fn cmd_menubar() -> Result<()> {
                 menubar_sync_sleep();
             } else if event.id == state.kill_inactive_item.id() {
                 kill_inactive_claudes();
+            } else if event.id == state.dictation_item.id() {
+                let new_enabled = !dictation_manager.is_enabled();
+                dictation_manager.set_enabled(new_enabled);
+                if new_enabled && dictation_manager.is_available() {
+                    if let Err(e) = dictation_manager.start() {
+                        eprintln!("[dictation] Failed to start: {}", e);
+                    }
+                }
+                // Update menu item text
+                let text = if dictation_manager.is_available() {
+                    if new_enabled {
+                        "🎤 Dictation (Fn+Shift)"
+                    } else {
+                        "🎤 Dictation (Off)"
+                    }
+                } else {
+                    "🎤 Dictation (Unavailable)"
+                };
+                state.dictation_item.set_text(text);
+                state.dictation_item.set_checked(new_enabled);
+            } else if let Some(ref setup_item) = state.setup_dictation_item {
+                if event.id == setup_item.id() {
+                    run_dictation_setup();
+                }
+            } else if let Some(ref update_item) = state.update_item {
+                if event.id == update_item.id() {
+                    open_releases_page();
+                }
             } else if event.id == state.uninstall_item.id() {
                 let _ = run_uninstall_flow();
                 *control_flow = ControlFlow::Exit;
