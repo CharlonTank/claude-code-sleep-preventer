@@ -860,7 +860,7 @@ This will remove:
 
     let script = "/Applications/ClaudeSleepPreventer.app/Contents/MacOS/claude-sleep-preventer uninstall";
 
-    match authorization::execute_with_privileges(script, &[]) {
+    match authorization::execute_script_with_privileges(script) {
         Ok(true) => {
             native_dialogs::show_dialog("Uninstall complete.", "Uninstall");
         }
