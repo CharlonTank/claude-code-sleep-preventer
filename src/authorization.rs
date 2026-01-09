@@ -28,9 +28,3 @@ pub fn execute_script_with_privileges(script: &str) -> Result<bool, String> {
         Err(stderr.trim().to_string())
     }
 }
-
-/// Run multiple commands with a single authentication prompt
-pub fn execute_commands_with_privileges(commands: &[&str]) -> Result<bool, String> {
-    let script = commands.join(" && ");
-    execute_script_with_privileges(&script)
-}

@@ -2,6 +2,7 @@ mod authorization;
 mod dictation;
 mod logging;
 mod native_dialogs;
+mod objc_utils;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -107,7 +108,11 @@ enum Commands {
         yes: bool,
     },
     /// Uninstall hooks and restore defaults
-    Uninstall,
+    Uninstall {
+        /// Keep Whisper model data (~500 MB)
+        #[arg(short = 'k', long)]
+        keep_model: bool,
+    },
     /// Debug: list process names
     Debug,
 }
@@ -125,7 +130,7 @@ fn main() -> Result<()> {
         Commands::Reset => cmd_reset()?,
         Commands::Thermal => cmd_thermal()?,
         Commands::Install { yes } => cmd_install(yes)?,
-        Commands::Uninstall => cmd_uninstall()?,
+        Commands::Uninstall { keep_model } => cmd_uninstall(keep_model)?,
         Commands::Debug => cmd_debug()?,
     }
 
@@ -856,15 +861,32 @@ This will remove:
 • Claude Code hooks
 • Launch agent
 • App data and preferences
+• Whisper model (~500 MB) (optional)
 • Sudoers configuration";
 
-    if !native_dialogs::show_warning_dialog(message, "Uninstall", "Uninstall", "Cancel") {
+    let window = native_dialogs::SetupWindow::new("Uninstall", message);
+    window.set_primary_button("Uninstall");
+    window.set_secondary_button("Cancel");
+    window.set_secondary_visible(true);
+    window.set_checkbox("Also remove Whisper model (~500 MB)", true);
+    window.set_checkbox_visible(true);
+
+    let action = window.wait_for_action();
+    let remove_model = window.checkbox_checked();
+    window.close();
+
+    if action == native_dialogs::SetupAction::Secondary {
         return Ok(());
     }
 
-    let script = "/Applications/ClaudeSleepPreventer.app/Contents/MacOS/claude-sleep-preventer uninstall";
+    let mut script =
+        "/Applications/ClaudeSleepPreventer.app/Contents/MacOS/claude-sleep-preventer uninstall"
+            .to_string();
+    if !remove_model {
+        script.push_str(" -k");
+    }
 
-    match authorization::execute_script_with_privileges(script) {
+    match authorization::execute_script_with_privileges(&script) {
         Ok(true) => {
             native_dialogs::show_dialog("Uninstall complete.", "Uninstall");
         }
@@ -1191,6 +1213,7 @@ fn cmd_menubar() -> Result<()> {
 
     let mut event_loop = EventLoopBuilder::new().build();
     event_loop.set_activation_policy(ActivationPolicy::Accessory);
+    let tick_proxy = event_loop.create_proxy();
 
     let initial_instances = get_instance_items();
     let initial_inactive = get_inactive_claude_pids();
@@ -1245,8 +1268,9 @@ fn cmd_menubar() -> Result<()> {
 
     start_clamshell_notifications();
 
-    std::thread::spawn(|| {
+    std::thread::spawn(move || {
         let mut tick_counter = 0u64;
+        let _ = tick_proxy.send_event(());
 
         loop {
             std::thread::sleep(Duration::from_millis(100));
@@ -1269,6 +1293,8 @@ fn cmd_menubar() -> Result<()> {
                     release_sleep_assertion();
                 }
             }
+
+            let _ = tick_proxy.send_event(());
         }
     });
 
@@ -1277,8 +1303,8 @@ fn cmd_menubar() -> Result<()> {
     let mut last_inactive_count = initial_inactive.len();
 
     event_loop.run(move |_event, _, control_flow| {
-        // Poll more frequently for dictation updates (100ms), but only update menu every 2s
-        *control_flow = ControlFlow::WaitUntil(std::time::Instant::now() + Duration::from_millis(100));
+        // Drive updates from the tick thread to avoid relying on user input events.
+        *control_flow = ControlFlow::Wait;
 
         // Update dictation manager (handles Fn+Space events)
         dictation_manager.update();
@@ -1343,6 +1369,7 @@ fn cmd_menubar() -> Result<()> {
         }
 
         if let Ok(event) = menu_channel.try_recv() {
+            logging::log(&format!("[menu] event id={:?}", event.id));
             if event.id == state.toggle_item.id() {
                 let new_state = !MANUAL_SLEEP_PREVENTION.load(Ordering::SeqCst);
                 MANUAL_SLEEP_PREVENTION.store(new_state, Ordering::SeqCst);
@@ -1406,6 +1433,7 @@ fn cmd_menubar() -> Result<()> {
         // Handle global hotkeys
         if let Ok(event) = hotkey_receiver.try_recv() {
             if event.state == global_hotkey::HotKeyState::Pressed {
+                logging::log(&format!("[hotkey] Pressed id={}", event.id));
                 if event.id == hotkey_active_id {
                     let instances = get_instance_items();
                     if !instances.is_empty() {
@@ -1570,7 +1598,7 @@ fn cmd_install(auto_yes: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_uninstall() -> Result<()> {
+fn cmd_uninstall(keep_model: bool) -> Result<()> {
     let home = dirs::home_dir().context("Could not find home directory")?;
     let hooks_dir = home.join(".claude").join("hooks");
     let settings_file = home.join(".claude").join("settings.json");
@@ -1618,8 +1646,28 @@ fn cmd_uninstall() -> Result<()> {
 
     // Remove app data and preferences
     let app_support = home.join("Library/Application Support/ClaudeSleepPreventer");
-    let _ = fs::remove_dir_all(&app_support);
-    println!("Removed app data");
+    if app_support.exists() {
+        if keep_model {
+            if let Ok(entries) = fs::read_dir(&app_support) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name();
+                    if name == std::ffi::OsStr::new("models") {
+                        continue;
+                    }
+                    let path = entry.path();
+                    if path.is_dir() {
+                        let _ = fs::remove_dir_all(&path);
+                    } else {
+                        let _ = fs::remove_file(&path);
+                    }
+                }
+            }
+            println!("Removed app data (kept Whisper model)");
+        } else {
+            let _ = fs::remove_dir_all(&app_support);
+            println!("Removed app data");
+        }
+    }
 
     // Remove logs
     let logs_dir = home.join("Library/Logs/ClaudeSleepPreventer");

@@ -1,7 +1,11 @@
 use std::env;
 use std::fs;
+use std::io::Read;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::mpsc;
+
+use objc::{class, msg_send, sel, sel_impl};
 
 use crate::native_dialogs;
 
@@ -30,7 +34,7 @@ impl WhisperTranscriber {
         }
     }
 
-    /// Find whisper-cli: bundled first, then system
+    /// Find whisper-cli: bundled first, then homebrew, then system PATH
     fn find_whisper_cli() -> PathBuf {
         // Try bundled version first (in app's Resources folder)
         if let Some(exe_path) = env::current_exe().ok() {
@@ -46,7 +50,20 @@ impl WhisperTranscriber {
             }
         }
 
-        // Fall back to system whisper-cli
+        // Try common homebrew locations (not in PATH when launched from /Applications)
+        let homebrew_paths = [
+            "/opt/homebrew/bin/whisper-cli",  // Apple Silicon
+            "/usr/local/bin/whisper-cli",     // Intel Mac
+        ];
+
+        for path in homebrew_paths {
+            let p = PathBuf::from(path);
+            if p.exists() {
+                return p;
+            }
+        }
+
+        // Fall back to system whisper-cli (relies on PATH)
         PathBuf::from("whisper-cli")
     }
 
@@ -105,19 +122,13 @@ impl WhisperTranscriber {
         self.model_path.is_some()
     }
 
-    pub fn model_name(&self) -> Option<String> {
-        self.model_path.as_ref().and_then(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .map(|s| s.to_string())
-        })
-    }
-
     pub fn transcribe(&self, audio_path: &PathBuf) -> Result<String, String> {
         let model_path = self
             .model_path
             .as_ref()
             .ok_or("No Whisper model found. Use Setup Dictation to download.")?;
+
+        let language = preferred_language().unwrap_or_else(|| "auto".to_string());
 
         // Audio is already 16kHz mono WAV from AudioRecorder
         let output = Command::new(&self.whisper_path)
@@ -129,9 +140,9 @@ impl WhisperTranscriber {
                 "-t",
                 "8", // 8 threads for Apple Silicon
                 "--no-timestamps",
-                "-l",
-                "auto", // Auto-detect language
             ])
+            .args(["--suppress-nst"])
+            .args(["-l", &language])
             .output()
             .map_err(|e| format!("whisper-cli failed: {}", e))?;
 
@@ -149,49 +160,118 @@ impl WhisperTranscriber {
     }
 }
 
-/// Run the dictation setup flow via osascript dialogs
+/// Run the dictation setup flow in a single persistent window
 pub fn run_dictation_setup() {
     std::thread::spawn(|| {
-        let status = WhisperTranscriber::new().setup_status();
-
-        match status {
-            DictationSetupStatus::Ready => {
-                show_dialog("Dictation is already set up and ready to use!\n\nPress Fn+Shift to start recording.", "Setup Complete");
-            }
-            DictationSetupStatus::MissingModel => {
-                if !confirm_dialog(
-                    "Dictation requires a Whisper model (~500MB download).\n\nThis will download the medium model for speech recognition.\n\nContinue?",
-                    "Download Model"
-                ) {
-                    return;
-                }
-                download_model();
-            }
-        }
+        let window = native_dialogs::SetupWindow::new(
+            "Setup Dictation",
+            "Checking dictation setup...",
+        );
+        run_dictation_setup_with_window(&window);
+        window.close();
     });
 }
 
-fn show_dialog(message: &str, title: &str) {
-    native_dialogs::show_dialog(message, title);
+fn run_dictation_setup_with_window(window: &native_dialogs::SetupWindow) {
+    let status = WhisperTranscriber::new().setup_status();
+
+    match status {
+        DictationSetupStatus::Ready => {
+            window.set_title("Setup Complete");
+            window.set_message(
+                "Dictation is already set up and ready to use!\n\nPress Fn+Shift to start recording.",
+            );
+            window.set_primary_button("OK");
+            window.set_secondary_visible(false);
+            window.wait_for_action();
+        }
+        DictationSetupStatus::MissingModel => {
+            window.set_title("Download Model");
+            window.set_message(
+                "Dictation requires a Whisper model (~500MB download).\n\nThis will download the medium model for speech recognition.\n\nContinue?",
+            );
+            window.set_primary_button("Download");
+            window.set_secondary_button("Cancel");
+            window.set_secondary_visible(true);
+
+            let action = window.wait_for_action();
+            if action == native_dialogs::SetupAction::Secondary {
+                return;
+            }
+
+            match download_model_with_window(window) {
+                Ok(()) => {
+                    window.set_title("Setup Complete");
+                    window.set_message(
+                        "Dictation setup complete!\n\nRestart the app and press Fn+Shift to use dictation.",
+                    );
+                    window.set_primary_button("OK");
+                    window.set_secondary_visible(false);
+                    window.wait_for_action();
+                }
+                Err(e) => {
+                    window.set_title("Download Failed");
+                    window.set_message(&format!("Failed to download model:\n\n{}", e));
+                    window.set_primary_button("OK");
+                    window.set_secondary_visible(false);
+                    window.wait_for_action();
+                }
+            }
+        }
+    }
 }
 
-fn confirm_dialog(message: &str, title: &str) -> bool {
-    native_dialogs::show_confirm_dialog(message, title, "Continue", "Cancel")
-}
-
-fn download_model() {
-    show_progress("Downloading Whisper model (~500MB)...");
+pub(crate) fn download_model_with_window(
+    window: &native_dialogs::SetupWindow,
+) -> Result<(), String> {
+    window.set_title("Downloading Whisper Model");
+    window.set_message("Downloading Whisper model... 0%");
+    window.set_primary_enabled(false);
+    window.set_secondary_visible(false);
+    window.show_progress(true);
+    window.set_progress(0.0);
 
     let models_dir = WhisperTranscriber::app_support_dir().join("models");
     if let Err(e) = fs::create_dir_all(&models_dir) {
-        show_dialog(&format!("Failed to create models directory: {}", e), "Setup Failed");
-        return;
+        window.show_progress(false);
+        window.set_primary_enabled(true);
+        return Err(format!("Failed to create models directory: {}", e));
     }
 
     let model_path = models_dir.join(MODEL_FILENAME);
+    let model_path_for_thread = model_path.clone();
+    let handle = window.handle();
+    let (tx, rx) = mpsc::channel();
 
-    // Use curl with progress
-    let result = Command::new("curl")
+    std::thread::spawn(move || {
+        let result = download_model_with_progress(&model_path_for_thread, &handle);
+        let _ = tx.send(result);
+        handle.stop_modal();
+    });
+
+    window.run_modal();
+
+    let result = rx
+        .recv()
+        .unwrap_or_else(|_| Err("Download interrupted".to_string()));
+
+    if result.is_err() {
+        let _ = fs::remove_file(&model_path);
+    }
+
+    window.show_progress(false);
+    window.set_primary_enabled(true);
+
+    result
+}
+
+fn download_model_with_progress(
+    model_path: &PathBuf,
+    progress: &native_dialogs::SetupWindowHandle,
+) -> Result<(), String> {
+    use std::process::Stdio;
+
+    let mut child = Command::new("curl")
         .args([
             "-L",
             "--progress-bar",
@@ -199,31 +279,136 @@ fn download_model() {
             model_path.to_str().unwrap(),
             MODEL_URL,
         ])
-        .output();
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to start download: {}", e))?;
 
-    match result {
-        Ok(output) if output.status.success() => {
-            show_dialog(
-                "Dictation setup complete!\n\nRestart the app and press Fn+Shift to use dictation.",
-                "Setup Complete",
-            );
+    let mut stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "Failed to capture download progress".to_string())?;
+
+    let mut buffer = [0u8; 1024];
+    let mut line = String::new();
+    let mut last_percent = -1i32;
+
+    loop {
+        let read = stderr
+            .read(&mut buffer)
+            .map_err(|e| format!("Failed to read download progress: {}", e))?;
+        if read == 0 {
+            break;
         }
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            show_dialog(
-                &format!("Failed to download model:\n\n{}", stderr.lines().take(2).collect::<Vec<_>>().join("\n")),
-                "Download Failed",
-            );
-            // Clean up partial download
-            let _ = fs::remove_file(&model_path);
+
+        let chunk = String::from_utf8_lossy(&buffer[..read]);
+        for ch in chunk.chars() {
+            if ch == '\r' || ch == '\n' {
+                if let Some(percent) = extract_percent(&line) {
+                    let whole = percent.floor() as i32;
+                    if whole != last_percent {
+                        last_percent = whole;
+                        progress.set_progress(percent);
+                        progress.set_message(&format!(
+                            "Downloading Whisper model... {}%",
+                            whole
+                        ));
+                    }
+                }
+                line.clear();
+            } else {
+                line.push(ch);
+            }
         }
-        Err(e) => {
-            show_dialog(&format!("Failed to download: {}", e), "Download Failed");
-        }
+    }
+
+    if let Some(percent) = extract_percent(&line) {
+        progress.set_progress(percent);
+        progress.set_message(&format!(
+            "Downloading Whisper model... {}%",
+            percent.floor() as i32
+        ));
+    }
+
+    let status = child
+        .wait()
+        .map_err(|e| format!("Download failed to finish: {}", e))?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("Download failed with status: {}", status))
     }
 }
 
-fn show_progress(message: &str) {
-    // Use notification instead of blocking dialog
-    native_dialogs::show_notification(message, "Claude Sleep Preventer");
+fn extract_percent(line: &str) -> Option<f64> {
+    let percent_index = line.rfind('%')?;
+    let bytes = line.as_bytes();
+    let mut start = percent_index;
+    while start > 0 {
+        let c = bytes[start - 1] as char;
+        if c.is_ascii_digit() || c == '.' {
+            start -= 1;
+        } else {
+            break;
+        }
+    }
+    if start == percent_index {
+        return None;
+    }
+    line[start..percent_index].trim().parse().ok()
+}
+
+fn preferred_language() -> Option<String> {
+    preferred_language_from_env().or_else(preferred_language_from_system)
+}
+
+fn preferred_language_from_env() -> Option<String> {
+    let candidates = ["LC_ALL", "LC_CTYPE", "LANG"];
+    for key in candidates {
+        if let Ok(value) = env::var(key) {
+            if let Some(code) = parse_language_code(&value) {
+                return Some(code);
+            }
+        }
+    }
+    None
+}
+
+fn preferred_language_from_system() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        let languages: *mut objc::runtime::Object = msg_send![class!(NSLocale), preferredLanguages];
+        let count: usize = msg_send![languages, count];
+        if count == 0 {
+            return None;
+        }
+        let first: *mut objc::runtime::Object = msg_send![languages, objectAtIndex: 0usize];
+        let c_str: *const std::os::raw::c_char = msg_send![first, UTF8String];
+        if c_str.is_null() {
+            return None;
+        }
+        let lang = std::ffi::CStr::from_ptr(c_str).to_string_lossy();
+        parse_language_code(&lang)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
+fn parse_language_code(value: &str) -> Option<String> {
+    let trimmed = value.split('.').next().unwrap_or(value).trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let mut iter = trimmed.split(|c| c == '_' || c == '-');
+    let primary = iter.next().unwrap_or("").trim();
+    if primary.is_empty() || primary.eq_ignore_ascii_case("C") {
+        return None;
+    }
+
+    Some(primary.to_lowercase())
 }

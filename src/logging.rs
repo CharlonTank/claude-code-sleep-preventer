@@ -44,8 +44,3 @@ fn log_internal(message: &str) {
         }
     }
 }
-
-/// Get the log file path for users to find
-pub fn log_path() -> Option<PathBuf> {
-    LOG_FILE.lock().unwrap().clone()
-}

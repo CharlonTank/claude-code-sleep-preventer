@@ -1,9 +1,9 @@
 use crate::logging;
 use core_foundation::base::TCFType;
 use core_foundation::runloop::{kCFRunLoopDefaultMode, CFRunLoop};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 
 // Raw FFI bindings to Core Graphics
@@ -16,24 +16,26 @@ mod ffi {
     pub type CFRunLoopSourceRef = *mut c_void;
 
     pub type CGEventType = u32;
-    pub const kCGEventFlagsChanged: CGEventType = 12;
-    pub const kCGEventTapDisabledByTimeout: CGEventType = 0xFFFFFFFE;
-    pub const kCGEventTapDisabledByUserInput: CGEventType = 0xFFFFFFFF;
+    pub const K_CG_EVENT_FLAGS_CHANGED: CGEventType = 12;
+    pub const K_CG_EVENT_TAP_DISABLED_BY_TIMEOUT: CGEventType = 0xFFFFFFFE;
+    pub const K_CG_EVENT_TAP_DISABLED_BY_USER_INPUT: CGEventType = 0xFFFFFFFF;
 
     pub type CGEventFlags = u64;
-    pub const kCGEventFlagMaskSecondaryFn: CGEventFlags = 0x00800000;
-    pub const kCGEventFlagMaskShift: CGEventFlags = 0x00020000;
+    pub const K_CG_EVENT_FLAG_MASK_SECONDARY_FN: CGEventFlags = 0x00800000;
+    pub const K_CG_EVENT_FLAG_MASK_SHIFT: CGEventFlags = 0x00020000;
 
     pub type CGEventTapLocation = u32;
-    pub const kCGSessionEventTap: CGEventTapLocation = 1;
+    pub const K_CG_SESSION_EVENT_TAP: CGEventTapLocation = 1;
 
     pub type CGEventTapPlacement = u32;
-    pub const kCGHeadInsertEventTap: CGEventTapPlacement = 0;
+    pub const K_CG_HEAD_INSERT_EVENT_TAP: CGEventTapPlacement = 0;
 
     pub type CGEventTapOptions = u32;
-    pub const kCGEventTapOptionListenOnly: CGEventTapOptions = 1;
+    pub const K_CG_EVENT_TAP_OPTION_LISTEN_ONLY: CGEventTapOptions = 1;
 
     pub type CGEventMask = u64;
+    pub type CGEventField = u32;
+    pub const K_CG_KEYBOARD_EVENT_KEYCODE: CGEventField = 9;
 
     pub type CGEventTapCallBack = extern "C" fn(
         proxy: CGEventTapProxy,
@@ -55,6 +57,7 @@ mod ffi {
 
         pub fn CGEventTapEnable(tap: CFMachPortRef, enable: bool);
         pub fn CGEventGetFlags(event: CGEventRef) -> CGEventFlags;
+        pub fn CGEventGetIntegerValueField(event: CGEventRef, field: CGEventField) -> i64;
     }
 
     #[link(name = "CoreFoundation", kind = "framework")]
@@ -145,7 +148,46 @@ impl Drop for GlobeKeyManager {
 }
 
 // Global state for callback (necessary because C callbacks can't capture Rust closures)
-static mut CALLBACK_STATE: Option<CallbackState> = None;
+static CALLBACK_STATE: OnceLock<Mutex<Option<CallbackState>>> = OnceLock::new();
+static EVENT_TAP: AtomicPtr<std::ffi::c_void> = AtomicPtr::new(std::ptr::null_mut());
+static FLAGS_EVENT_COUNT: AtomicUsize = AtomicUsize::new(0);
+static DISABLED_TIMEOUT_COUNT: AtomicUsize = AtomicUsize::new(0);
+static DISABLED_USER_INPUT_COUNT: AtomicUsize = AtomicUsize::new(0);
+static LAST_FLAGS_RAW: AtomicU64 = AtomicU64::new(0);
+static LAST_KEYCODE: AtomicU64 = AtomicU64::new(u64::MAX);
+
+fn callback_state() -> &'static Mutex<Option<CallbackState>> {
+    CALLBACK_STATE.get_or_init(|| Mutex::new(None))
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct GlobeKeyDiagnostics {
+    pub flags_events: usize,
+    pub disabled_timeout: usize,
+    pub disabled_user_input: usize,
+    pub last_flags_raw: u64,
+    pub last_keycode: Option<u64>,
+}
+
+pub fn take_diagnostics() -> GlobeKeyDiagnostics {
+    let flags_events = FLAGS_EVENT_COUNT.swap(0, Ordering::Relaxed);
+    let disabled_timeout = DISABLED_TIMEOUT_COUNT.swap(0, Ordering::Relaxed);
+    let disabled_user_input = DISABLED_USER_INPUT_COUNT.swap(0, Ordering::Relaxed);
+    let last_flags_raw = LAST_FLAGS_RAW.load(Ordering::Relaxed);
+    let last_keycode_raw = LAST_KEYCODE.load(Ordering::Relaxed);
+
+    GlobeKeyDiagnostics {
+        flags_events,
+        disabled_timeout,
+        disabled_user_input,
+        last_flags_raw,
+        last_keycode: if last_keycode_raw == u64::MAX {
+            None
+        } else {
+            Some(last_keycode_raw)
+        },
+    }
+}
 
 struct CallbackState {
     fn_down: bool,
@@ -161,22 +203,36 @@ extern "C" fn event_tap_callback(
     _user_info: *mut std::ffi::c_void,
 ) -> ffi::CGEventRef {
     // Re-enable tap if disabled
-    if event_type == ffi::kCGEventTapDisabledByTimeout
-        || event_type == ffi::kCGEventTapDisabledByUserInput
+    if event_type == ffi::K_CG_EVENT_TAP_DISABLED_BY_TIMEOUT
+        || event_type == ffi::K_CG_EVENT_TAP_DISABLED_BY_USER_INPUT
     {
+        if event_type == ffi::K_CG_EVENT_TAP_DISABLED_BY_TIMEOUT {
+            DISABLED_TIMEOUT_COUNT.fetch_add(1, Ordering::Relaxed);
+        } else {
+            DISABLED_USER_INPUT_COUNT.fetch_add(1, Ordering::Relaxed);
+        }
+        let tap = EVENT_TAP.load(Ordering::SeqCst);
+        if !tap.is_null() {
+            unsafe { ffi::CGEventTapEnable(tap as ffi::CFMachPortRef, true); }
+        }
         return event;
     }
 
-    if event_type != ffi::kCGEventFlagsChanged {
+    if event_type != ffi::K_CG_EVENT_FLAGS_CHANGED {
         return event;
     }
 
     unsafe {
-        if let Some(state) = CALLBACK_STATE.as_mut() {
+        let mut state_guard = callback_state().lock().unwrap();
+        if let Some(state) = state_guard.as_mut() {
             let flags = ffi::CGEventGetFlags(event);
+            let keycode = ffi::CGEventGetIntegerValueField(event, ffi::K_CG_KEYBOARD_EVENT_KEYCODE);
+            FLAGS_EVENT_COUNT.fetch_add(1, Ordering::Relaxed);
+            LAST_FLAGS_RAW.store(flags, Ordering::Relaxed);
+            LAST_KEYCODE.store(keycode as u64, Ordering::Relaxed);
 
-            let fn_down = (flags & ffi::kCGEventFlagMaskSecondaryFn) != 0;
-            let shift_down = (flags & ffi::kCGEventFlagMaskShift) != 0;
+            let fn_down = (flags & ffi::K_CG_EVENT_FLAG_MASK_SECONDARY_FN) != 0;
+            let shift_down = (flags & ffi::K_CG_EVENT_FLAG_MASK_SHIFT) != 0;
 
             state.fn_down = fn_down;
             state.shift_down = shift_down;
@@ -201,8 +257,9 @@ fn run_event_tap(tx: Sender<GlobeKeyEvent>, stop_flag: Arc<AtomicBool>) {
     logging::log("[globe_key] Starting native CGEventTap...");
 
     // Initialize global callback state
-    unsafe {
-        CALLBACK_STATE = Some(CallbackState {
+    {
+        let mut state_guard = callback_state().lock().unwrap();
+        *state_guard = Some(CallbackState {
             fn_down: false,
             shift_down: false,
             is_dictating: false,
@@ -211,14 +268,14 @@ fn run_event_tap(tx: Sender<GlobeKeyEvent>, stop_flag: Arc<AtomicBool>) {
     }
 
     // Event mask for flags changed
-    let event_mask: ffi::CGEventMask = 1 << ffi::kCGEventFlagsChanged;
+    let event_mask: ffi::CGEventMask = 1 << ffi::K_CG_EVENT_FLAGS_CHANGED;
 
     // Create event tap
     let tap = unsafe {
         ffi::CGEventTapCreate(
-            ffi::kCGSessionEventTap,
-            ffi::kCGHeadInsertEventTap,
-            ffi::kCGEventTapOptionListenOnly,
+            ffi::K_CG_SESSION_EVENT_TAP,
+            ffi::K_CG_HEAD_INSERT_EVENT_TAP,
+            ffi::K_CG_EVENT_TAP_OPTION_LISTEN_ONLY,
             event_mask,
             event_tap_callback,
             std::ptr::null_mut(),
@@ -231,6 +288,9 @@ fn run_event_tap(tx: Sender<GlobeKeyEvent>, stop_flag: Arc<AtomicBool>) {
         );
         return;
     }
+
+    EVENT_TAP.store(tap as *mut std::ffi::c_void, Ordering::SeqCst);
+    logging::log(&format!("[globe_key] CGEventTap created: {:p}", tap));
 
     // Enable the tap
     unsafe {
@@ -267,9 +327,11 @@ fn run_event_tap(tx: Sender<GlobeKeyEvent>, stop_flag: Arc<AtomicBool>) {
     }
 
     // Cleanup
-    unsafe {
-        CALLBACK_STATE = None;
+    {
+        let mut state_guard = callback_state().lock().unwrap();
+        *state_guard = None;
     }
+    EVENT_TAP.store(std::ptr::null_mut(), Ordering::SeqCst);
 
     logging::log("[globe_key] CGEventTap stopped");
 }

@@ -2,7 +2,7 @@
 
 ## Meta
 
-- **Keep this file updated**: When you add new scripts, processes, or important patterns, update this CLAUDE.md file so future sessions have accurate context.
+- **Keep this file updated**: When you add new scripts, processes, or important patterns, update this AGENTS.md file so future sessions have accurate context.
 
 ## Code Quality
 
@@ -16,7 +16,7 @@ Before testing a new build, run the Rust cleanup task to ensure a fresh state:
 cargo xtask clean
 ```
 
-Optional: keep Whisper models (~500 MB):
+Optional: keep Whisper models (~500 MB) and whisper-cli:
 
 ```bash
 cargo xtask clean --keep-model
@@ -29,7 +29,19 @@ This removes:
 - Claude Code hooks
 - Sudoers config
 - TCC permissions (Input Monitoring, Microphone, Accessibility)
-- Whisper CLI + models (Homebrew paths and /tmp build)
+- Whisper CLI + models (Homebrew paths and /tmp build), unless `--keep-model`
+
+## Dev scripts (Rust only)
+
+- `cargo xtask complete-test --skip-notarize` (clean system, build DMG, open it)
+- `cargo xtask complete-test --skip-notarize --keep-model` (same but keeps models + whisper-cli)
+- `cargo xtask build-dmg --skip-notarize` (local DMG build only)
+- `cargo xtask replace-app --open` (rebuild + replace /Applications app)
+- `cargo xtask release X.Y.Z --upload` (bump, build DMG, notarize, upload)
+
+## Uninstall
+
+- `claude-sleep-preventer uninstall` removes app data by default; use `-k`/`--keep-model` to preserve Whisper models (~500 MB).
 
 ## Release Process
 

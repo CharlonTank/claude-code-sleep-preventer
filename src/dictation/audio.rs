@@ -1,52 +1,76 @@
+use block::ConcreteBlock;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use hound::{SampleFormat, WavSpec, WavWriter};
 use objc::{class, msg_send, sel, sel_impl};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 // Link AVFoundation framework
 #[link(name = "AVFoundation", kind = "framework")]
 extern "C" {}
 
-/// Check and request microphone permission using AVFoundation
-pub fn check_and_request_microphone_permission() -> MicrophonePermission {
+/// Check current microphone permission status
+pub fn check_microphone_permission() -> MicrophonePermission {
     unsafe {
-        // AVMediaTypeAudio = "soun"
         let media_type: *mut objc::runtime::Object =
             msg_send![class!(NSString), stringWithUTF8String: b"soun\0".as_ptr()];
 
-        // Check current authorization status
         let status: i64 = msg_send![class!(AVCaptureDevice), authorizationStatusForMediaType: media_type];
 
         match status {
-            0 => {
-                // AVAuthorizationStatusNotDetermined - need to request
-                request_microphone_access();
-                MicrophonePermission::Requesting
-            }
-            1 => MicrophonePermission::Denied,  // AVAuthorizationStatusRestricted
-            2 => MicrophonePermission::Denied,  // AVAuthorizationStatusDenied
-            3 => MicrophonePermission::Granted, // AVAuthorizationStatusAuthorized
+            0 => MicrophonePermission::NotDetermined,
+            1 => MicrophonePermission::Denied,  // Restricted
+            2 => MicrophonePermission::Denied,  // Denied
+            3 => MicrophonePermission::Granted,
             _ => MicrophonePermission::Denied,
         }
     }
 }
 
-fn request_microphone_access() {
+/// Request microphone permission and wait for result (blocking)
+/// Returns true if granted, false if denied
+pub fn request_microphone_permission_sync() -> bool {
+    let result = Arc::new((Mutex::new(None::<bool>), Condvar::new()));
+    let result_clone = result.clone();
+
     unsafe {
         let media_type: *mut objc::runtime::Object =
             msg_send![class!(NSString), stringWithUTF8String: b"soun\0".as_ptr()];
 
+        // Create completion handler block
+        let block = ConcreteBlock::new(move |granted: bool| {
+            let (lock, cvar) = &*result_clone;
+            let mut result = lock.lock().unwrap();
+            *result = Some(granted);
+            cvar.notify_one();
+        });
+        let block = block.copy();
+
         // Request access - this triggers the system dialog
-        let _: () = msg_send![class!(AVCaptureDevice), requestAccessForMediaType: media_type completionHandler: std::ptr::null::<objc::runtime::Object>()];
+        let _: () = msg_send![class!(AVCaptureDevice), requestAccessForMediaType: media_type completionHandler: &*block];
     }
+
+    // Wait for result with timeout (30 seconds - user may take time to respond)
+    let (lock, cvar) = &*result;
+    let mut guard = lock.lock().unwrap();
+    let timeout = std::time::Duration::from_secs(30);
+
+    while guard.is_none() {
+        let (new_guard, timeout_result) = cvar.wait_timeout(guard, timeout).unwrap();
+        guard = new_guard;
+        if timeout_result.timed_out() {
+            return false;
+        }
+    }
+
+    guard.unwrap_or(false)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum MicrophonePermission {
     Granted,
     Denied,
-    Requesting,
+    NotDetermined,
 }
 
 pub struct AudioRecorder {
@@ -221,11 +245,4 @@ impl AudioRecorder {
         output
     }
 
-    pub fn sample_rate(&self) -> u32 {
-        self.sample_rate
-    }
-
-    pub fn has_samples(&self) -> bool {
-        !self.samples.lock().unwrap().is_empty()
-    }
 }

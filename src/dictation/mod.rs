@@ -9,11 +9,15 @@ pub use onboarding::run_onboarding_if_needed;
 pub use transcription::run_dictation_setup;
 
 use crate::logging;
-use audio::{check_and_request_microphone_permission, AudioRecorder, MicrophonePermission};
+use audio::{
+    check_microphone_permission, request_microphone_permission_sync, AudioRecorder,
+    MicrophonePermission,
+};
 use globe_key::{GlobeKeyEvent, GlobeKeyManager};
 use overlay::{OverlayMode, RecordingOverlay};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
+use std::time::{Duration, Instant};
 use transcription::WhisperTranscriber;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -36,6 +40,9 @@ pub struct DictationManager {
     overlay: RecordingOverlay,
     result_rx: Option<Receiver<DictationResult>>,
     enabled: bool,
+    last_diag_log: Instant,
+    last_flags_seen: Instant,
+    last_no_flags_log: Instant,
 }
 
 impl DictationManager {
@@ -48,28 +55,33 @@ impl DictationManager {
             overlay: RecordingOverlay::new(),
             result_rx: None,
             enabled: true,
+            last_diag_log: Instant::now(),
+            last_flags_seen: Instant::now(),
+            last_no_flags_log: Instant::now(),
         }
     }
 
     pub fn start(&mut self) -> Result<(), String> {
         if !self.transcriber.is_available() {
             return Err(
-                "Whisper not available. Install with: brew install whisper-cpp".to_string(),
+                "Whisper model not found. Use 'Setup Dictation...' from the menu to download it.".to_string(),
             );
         }
 
         // Check/request microphone permission
-        let mic_permission = check_and_request_microphone_permission();
-        logging::log(&format!("[dictation] Microphone permission: {:?}", mic_permission));
+        let mut mic_permission = check_microphone_permission();
+        if mic_permission == MicrophonePermission::NotDetermined {
+            logging::log("[dictation] Microphone permission not yet determined, requesting...");
+            mic_permission = if request_microphone_permission_sync() {
+                MicrophonePermission::Granted
+            } else {
+                MicrophonePermission::Denied
+            };
+        }
 
-        match mic_permission {
-            MicrophonePermission::Granted => {}
-            MicrophonePermission::Requesting => {
-                logging::log("[dictation] Requesting microphone permission...");
-            }
-            MicrophonePermission::Denied => {
-                logging::log("[dictation] Microphone permission denied");
-            }
+        logging::log(&format!("[dictation] Microphone permission: {:?}", mic_permission));
+        if mic_permission == MicrophonePermission::Denied {
+            logging::log("[dictation] Microphone permission denied");
         }
 
         self.globe_key.start()
@@ -96,14 +108,6 @@ impl DictationManager {
         self.transcriber.is_available()
     }
 
-    pub fn state(&self) -> DictationState {
-        self.state
-    }
-
-    pub fn model_name(&self) -> Option<String> {
-        self.transcriber.model_name()
-    }
-
     pub fn update(&mut self) {
         if !self.enabled {
             return;
@@ -113,18 +117,55 @@ impl DictationManager {
         while let Some(event) = self.globe_key.try_recv() {
             match event {
                 GlobeKeyEvent::Ready => {
-                    logging::log("[dictation] Globe key listener ready");
+                    logging::log("[dictation] Globe key listener ready (event)");
                 }
                 GlobeKeyEvent::DictateStart => {
+                    logging::log("[dictation] DictateStart event received");
                     if self.state == DictationState::Idle {
                         self.start_recording();
                     }
                 }
                 GlobeKeyEvent::DictateStop => {
+                    logging::log("[dictation] DictateStop event received");
                     if self.state == DictationState::Recording {
                         self.stop_and_transcribe();
                     }
                 }
+            }
+        }
+
+        if self.last_diag_log.elapsed() >= Duration::from_secs(2) {
+            self.last_diag_log = Instant::now();
+            let diag = globe_key::take_diagnostics();
+            if diag.flags_events > 0 {
+                self.last_flags_seen = Instant::now();
+                if let Some(keycode) = diag.last_keycode {
+                    logging::log(&format!(
+                        "[globe_key] flags events={}, last keycode={}, raw flags=0x{:x}",
+                        diag.flags_events, keycode, diag.last_flags_raw
+                    ));
+                } else {
+                    logging::log(&format!(
+                        "[globe_key] flags events={}, raw flags=0x{:x}",
+                        diag.flags_events, diag.last_flags_raw
+                    ));
+                }
+            }
+
+            if diag.disabled_timeout > 0 || diag.disabled_user_input > 0 {
+                logging::log(&format!(
+                    "[globe_key] tap disabled: timeout={}, user_input={}",
+                    diag.disabled_timeout, diag.disabled_user_input
+                ));
+            }
+
+            if self.last_flags_seen.elapsed() >= Duration::from_secs(15)
+                && self.last_no_flags_log.elapsed() >= Duration::from_secs(15)
+            {
+                self.last_no_flags_log = Instant::now();
+                logging::log(
+                    "[globe_key] No modifier events seen for 15s. Check Input Monitoring permission.",
+                );
             }
         }
 

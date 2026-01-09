@@ -1,33 +1,38 @@
-use core_foundation::base::{CFRelease, TCFType};
-use core_foundation::string::{CFString, CFStringRef};
+use core_foundation::base::{CFIndex, CFRelease};
 use std::ffi::c_void;
 use std::ptr;
 
 use crate::logging;
 
-// AXUIElement FFI bindings
 #[link(name = "ApplicationServices", kind = "framework")]
 extern "C" {
-    fn AXUIElementCreateSystemWide() -> AXUIElementRef;
-    fn AXUIElementCopyAttributeValue(
-        element: AXUIElementRef,
-        attribute: CFStringRef,
-        value: *mut CFTypeRef,
-    ) -> i32;
-    fn AXUIElementSetAttributeValue(
-        element: AXUIElementRef,
-        attribute: CFStringRef,
-        value: CFTypeRef,
-    ) -> i32;
     fn AXIsProcessTrusted() -> bool;
 }
 
-type AXUIElementRef = *mut c_void;
-type CFTypeRef = *mut c_void;
+#[link(name = "CoreGraphics", kind = "framework")]
+extern "C" {
+    fn CGEventCreateKeyboardEvent(
+        source: CGEventSourceRef,
+        virtual_key: CGKeyCode,
+        key_down: bool,
+    ) -> CGEventRef;
+    fn CGEventKeyboardSetUnicodeString(
+        event: CGEventRef,
+        string_length: CFIndex,
+        unicode_string: *const UniChar,
+    );
+    fn CGEventPost(tap_location: CGEventTapLocation, event: CGEventRef);
+}
 
-// AX error codes
-const K_AX_ERROR_SUCCESS: i32 = 0;
+type CGEventRef = *mut c_void;
+type CGEventSourceRef = *mut c_void;
+type CGEventTapLocation = u32;
+type CGKeyCode = u16;
+type UniChar = u16;
 
+const K_CG_HID_EVENT_TAP: CGEventTapLocation = 0;
+
+/// Inject text by posting key events (does not touch the clipboard).
 pub fn inject_text(text: &str) -> Result<(), String> {
     if text.is_empty() {
         return Ok(());
@@ -36,73 +41,47 @@ pub fn inject_text(text: &str) -> Result<(), String> {
     // Check if we have accessibility permission
     let trusted = unsafe { AXIsProcessTrusted() };
     if !trusted {
-        return Err("Accessibility permission required. Please enable in System Preferences > Security & Privacy > Privacy > Accessibility".to_string());
+        return Err("Accessibility permission required".to_string());
+    }
+
+    inject_via_keystrokes(text)?;
+
+    logging::log(&format!(
+        "[text_injection] Successfully injected {} chars via keystrokes",
+        text.len()
+    ));
+    Ok(())
+}
+
+fn inject_via_keystrokes(text: &str) -> Result<(), String> {
+    let normalized = text.replace('\n', "\r");
+    let utf16: Vec<UniChar> = normalized.encode_utf16().collect();
+    if utf16.is_empty() {
+        return Ok(());
     }
 
     unsafe {
-        // Get the system-wide accessibility element
-        let system_wide = AXUIElementCreateSystemWide();
-        if system_wide.is_null() {
-            return Err("Failed to create system-wide element".to_string());
+        let key_down = CGEventCreateKeyboardEvent(ptr::null_mut(), 0, true);
+        if key_down.is_null() {
+            return Err("Failed to create key down event".to_string());
         }
+        CGEventKeyboardSetUnicodeString(key_down, utf16.len() as CFIndex, utf16.as_ptr());
+        CGEventPost(K_CG_HID_EVENT_TAP, key_down);
+        CFRelease(key_down as *const c_void);
 
-        // Get the focused UI element
-        let focused_attr = CFString::new("AXFocusedUIElement");
-        let mut focused_element: CFTypeRef = ptr::null_mut();
-
-        let result = AXUIElementCopyAttributeValue(
-            system_wide,
-            focused_attr.as_concrete_TypeRef(),
-            &mut focused_element,
-        );
-
-        CFRelease(system_wide as *mut c_void);
-
-        if result != K_AX_ERROR_SUCCESS || focused_element.is_null() {
-            return Err(format!("No focused element found (error: {})", result));
+        let key_up = CGEventCreateKeyboardEvent(ptr::null_mut(), 0, false);
+        if key_up.is_null() {
+            return Err("Failed to create key up event".to_string());
         }
-
-        // Try to set AXSelectedText (replaces selection or inserts at cursor)
-        let selected_text_attr = CFString::new("AXSelectedText");
-        let text_value = CFString::new(text);
-
-        let set_result = AXUIElementSetAttributeValue(
-            focused_element as AXUIElementRef,
-            selected_text_attr.as_concrete_TypeRef(),
-            text_value.as_concrete_TypeRef() as CFTypeRef,
-        );
-
-        CFRelease(focused_element);
-
-        if set_result != K_AX_ERROR_SUCCESS {
-            // Fallback: try setting AXValue (replaces entire content)
-            logging::log(&format!(
-                "[text_injection] AXSelectedText failed ({}), trying fallback",
-                set_result
-            ));
-            return Err(format!(
-                "Failed to inject text via AXSelectedText (error: {})",
-                set_result
-            ));
-        }
-
-        logging::log(&format!(
-            "[text_injection] Successfully injected {} chars",
-            text.len()
-        ));
-        Ok(())
+        CGEventKeyboardSetUnicodeString(key_up, utf16.len() as CFIndex, utf16.as_ptr());
+        CGEventPost(K_CG_HID_EVENT_TAP, key_up);
+        CFRelease(key_up as *const c_void);
     }
+
+    Ok(())
 }
 
 /// Check if accessibility is enabled for this app
 pub fn check_accessibility_permission() -> bool {
     unsafe { AXIsProcessTrusted() }
-}
-
-/// Prompt user to enable accessibility permission
-pub fn request_accessibility_permission() {
-    // Open System Preferences to Accessibility pane
-    let _ = std::process::Command::new("open")
-        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
-        .spawn();
 }
