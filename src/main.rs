@@ -825,7 +825,7 @@ Administrator password required.";
         return Ok(());
     }
 
-    let script = "/Applications/ClaudeSleepPreventer.app/Contents/MacOS/claude-sleep-preventer install --yes";
+    let script = "/Applications/ClaudeSleepPreventer.app/Contents/MacOS/claude-sleep-preventer install -y";
 
     match authorization::execute_script_with_privileges(script) {
         Ok(true) => {
