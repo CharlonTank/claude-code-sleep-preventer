@@ -1,77 +1,108 @@
-use std::io::Write;
-use std::process::{Command, Stdio};
-use std::thread;
-use std::time::Duration;
+use core_foundation::base::{CFRelease, TCFType};
+use core_foundation::string::{CFString, CFStringRef};
+use std::ffi::c_void;
+use std::ptr;
+
+use crate::logging;
+
+// AXUIElement FFI bindings
+#[link(name = "ApplicationServices", kind = "framework")]
+extern "C" {
+    fn AXUIElementCreateSystemWide() -> AXUIElementRef;
+    fn AXUIElementCopyAttributeValue(
+        element: AXUIElementRef,
+        attribute: CFStringRef,
+        value: *mut CFTypeRef,
+    ) -> i32;
+    fn AXUIElementSetAttributeValue(
+        element: AXUIElementRef,
+        attribute: CFStringRef,
+        value: CFTypeRef,
+    ) -> i32;
+    fn AXIsProcessTrusted() -> bool;
+}
+
+type AXUIElementRef = *mut c_void;
+type CFTypeRef = *mut c_void;
+
+// AX error codes
+const K_AX_ERROR_SUCCESS: i32 = 0;
 
 pub fn inject_text(text: &str) -> Result<(), String> {
     if text.is_empty() {
         return Ok(());
     }
 
-    // Save current clipboard content
-    let original_clipboard = get_clipboard_content();
-
-    // Set text to clipboard
-    set_clipboard_content(text)?;
-
-    // Small delay to ensure clipboard is ready
-    thread::sleep(Duration::from_millis(50));
-
-    // Simulate Cmd+V using AppleScript
-    let script = r#"tell application "System Events" to keystroke "v" using command down"#;
-    let output = Command::new("osascript")
-        .args(["-e", script])
-        .output()
-        .map_err(|e| format!("Failed to execute paste: {}", e))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("Paste command failed: {}", stderr));
+    // Check if we have accessibility permission
+    let trusted = unsafe { AXIsProcessTrusted() };
+    if !trusted {
+        return Err("Accessibility permission required. Please enable in System Preferences > Security & Privacy > Privacy > Accessibility".to_string());
     }
 
-    // Restore original clipboard after a short delay (in background)
-    if let Some(content) = original_clipboard {
-        thread::spawn(move || {
-            thread::sleep(Duration::from_millis(200));
-            let _ = set_clipboard_content(&content);
-        });
-    }
+    unsafe {
+        // Get the system-wide accessibility element
+        let system_wide = AXUIElementCreateSystemWide();
+        if system_wide.is_null() {
+            return Err("Failed to create system-wide element".to_string());
+        }
 
-    Ok(())
-}
+        // Get the focused UI element
+        let focused_attr = CFString::new("AXFocusedUIElement");
+        let mut focused_element: CFTypeRef = ptr::null_mut();
 
-fn get_clipboard_content() -> Option<String> {
-    Command::new("pbpaste")
-        .output()
-        .ok()
-        .and_then(|o| {
-            if o.status.success() {
-                String::from_utf8(o.stdout).ok()
-            } else {
-                None
-            }
-        })
-}
+        let result = AXUIElementCopyAttributeValue(
+            system_wide,
+            focused_attr.as_concrete_TypeRef(),
+            &mut focused_element,
+        );
 
-fn set_clipboard_content(text: &str) -> Result<(), String> {
-    let mut child = Command::new("pbcopy")
-        .stdin(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("Failed to spawn pbcopy: {}", e))?;
+        CFRelease(system_wide as *mut c_void);
 
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(text.as_bytes())
-            .map_err(|e| format!("Failed to write to pbcopy: {}", e))?;
-    }
+        if result != K_AX_ERROR_SUCCESS || focused_element.is_null() {
+            return Err(format!("No focused element found (error: {})", result));
+        }
 
-    let status = child
-        .wait()
-        .map_err(|e| format!("Failed to wait for pbcopy: {}", e))?;
+        // Try to set AXSelectedText (replaces selection or inserts at cursor)
+        let selected_text_attr = CFString::new("AXSelectedText");
+        let text_value = CFString::new(text);
 
-    if status.success() {
+        let set_result = AXUIElementSetAttributeValue(
+            focused_element as AXUIElementRef,
+            selected_text_attr.as_concrete_TypeRef(),
+            text_value.as_concrete_TypeRef() as CFTypeRef,
+        );
+
+        CFRelease(focused_element);
+
+        if set_result != K_AX_ERROR_SUCCESS {
+            // Fallback: try setting AXValue (replaces entire content)
+            logging::log(&format!(
+                "[text_injection] AXSelectedText failed ({}), trying fallback",
+                set_result
+            ));
+            return Err(format!(
+                "Failed to inject text via AXSelectedText (error: {})",
+                set_result
+            ));
+        }
+
+        logging::log(&format!(
+            "[text_injection] Successfully injected {} chars",
+            text.len()
+        ));
         Ok(())
-    } else {
-        Err("pbcopy failed".to_string())
     }
+}
+
+/// Check if accessibility is enabled for this app
+pub fn check_accessibility_permission() -> bool {
+    unsafe { AXIsProcessTrusted() }
+}
+
+/// Prompt user to enable accessibility permission
+pub fn request_accessibility_permission() {
+    // Open System Preferences to Accessibility pane
+    let _ = std::process::Command::new("open")
+        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
+        .spawn();
 }

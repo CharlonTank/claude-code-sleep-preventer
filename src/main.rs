@@ -1,8 +1,11 @@
+mod authorization;
 mod dictation;
+mod logging;
+mod native_dialogs;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use dictation::{run_dictation_setup, DictationManager};
+use dictation::{run_dictation_setup, run_onboarding_if_needed, DictationManager};
 use core_foundation::base::{kCFAllocatorDefault, TCFType};
 use core_foundation::boolean::CFBoolean;
 use core_foundation::runloop::{
@@ -805,81 +808,69 @@ fn is_installed() -> bool {
 }
 
 fn run_first_time_setup() -> Result<()> {
-    let result = Command::new("osascript")
-        .args([
-            "-e",
-            r#"display dialog "Claude Sleep Preventer needs to be configured to work with Claude Code.
+    let message = "Claude Sleep Preventer needs to be configured to work with Claude Code.
 
 This will:
 • Install the CLI tool
 • Configure Claude Code hooks
 • Set up automatic startup
 
-Administrator password required." buttons {"Cancel", "Set Up"} default button "Set Up" with title "Claude Sleep Preventer" with icon note"#,
-        ])
-        .output()?;
+Administrator password required.";
 
-    if !result.status.success() || String::from_utf8_lossy(&result.stdout).contains("Cancel") {
+    if !native_dialogs::show_confirm_dialog(message, "Claude Sleep Preventer", "Set Up", "Cancel") {
         return Ok(());
     }
 
-    let script = r#"do shell script "echo 'y' | /Applications/ClaudeSleepPreventer.app/Contents/MacOS/claude-sleep-preventer install" with administrator privileges"#;
+    let script = "echo 'y' | /Applications/ClaudeSleepPreventer.app/Contents/MacOS/claude-sleep-preventer install";
 
-    let install_result = Command::new("osascript").args(["-e", script]).output()?;
-
-    if install_result.status.success() {
-        let _ = Command::new("osascript")
-            .args([
-                "-e",
-                r#"display dialog "Setup complete!
-
-Restart Claude Code to activate sleep prevention." buttons {"OK"} default button "OK" with title "Claude Sleep Preventer" with icon note"#,
-            ])
-            .output();
-    } else {
-        let error = String::from_utf8_lossy(&install_result.stderr);
-        let _ = Command::new("osascript")
-            .args([
-                "-e",
-                &format!(r#"display dialog "Setup failed: {}" buttons {{"OK"}} default button "OK" with title "Claude Sleep Preventer" with icon stop"#, error.lines().next().unwrap_or("Unknown error")),
-            ])
-            .output();
+    match authorization::execute_script_with_privileges(script) {
+        Ok(true) => {
+            native_dialogs::show_dialog(
+                "Setup complete!\n\nRestart Claude Code to activate sleep prevention.",
+                "Claude Sleep Preventer",
+            );
+        }
+        Ok(false) => {
+            // User cancelled
+        }
+        Err(e) => {
+            native_dialogs::show_dialog(
+                &format!("Setup failed: {}", e),
+                "Claude Sleep Preventer",
+            );
+        }
     }
 
     Ok(())
 }
 
 fn run_uninstall_flow() -> Result<()> {
-    let result = Command::new("osascript")
-        .args([
-            "-e",
-            r#"display dialog "Are you sure you want to uninstall Claude Sleep Preventer?
+    let message = "Are you sure you want to uninstall Claude Sleep Preventer?
 
 This will remove:
+• The app from /Applications
 • Claude Code hooks
 • Launch agent
-• Sudoers configuration
+• App data and preferences
+• Sudoers configuration";
 
-The app will remain in /Applications." buttons {"Cancel", "Uninstall"} default button "Cancel" with title "Uninstall" with icon caution"#,
-        ])
-        .output()?;
-
-    if !result.status.success() || String::from_utf8_lossy(&result.stdout).contains("Cancel") {
+    if !native_dialogs::show_warning_dialog(message, "Uninstall", "Uninstall", "Cancel") {
         return Ok(());
     }
 
-    let script = r#"do shell script "/Applications/ClaudeSleepPreventer.app/Contents/MacOS/claude-sleep-preventer uninstall" with administrator privileges"#;
+    let script = "/Applications/ClaudeSleepPreventer.app/Contents/MacOS/claude-sleep-preventer uninstall";
 
-    let _ = Command::new("osascript").args(["-e", script]).output();
-
-    let _ = Command::new("osascript")
-        .args([
-            "-e",
-            r#"display dialog "Uninstall complete.
-
-You can delete the app from /Applications manually." buttons {"OK"} default button "OK" with title "Uninstall" with icon note"#,
-        ])
-        .output();
+    match authorization::execute_with_privileges(script, &[]) {
+        Ok(true) => {
+            native_dialogs::show_dialog("Uninstall complete.", "Uninstall");
+        }
+        Ok(false) => {
+            // User cancelled
+        }
+        Err(e) => {
+            native_dialogs::show_dialog(&format!("Uninstall failed: {}", e), "Uninstall");
+        }
+    }
 
     Ok(())
 }
@@ -1177,12 +1168,19 @@ fn build_menu(
 }
 
 fn cmd_menubar() -> Result<()> {
+    // Initialize logging
+    logging::init();
+    logging::log("[main] Starting menubar app");
+
     if !is_installed() {
         run_first_time_setup()?;
         if !is_installed() {
             return Ok(());
         }
     }
+
+    // Run onboarding for dictation permissions on first launch
+    run_onboarding_if_needed();
 
     // Start background version check
     start_version_check();
@@ -1201,9 +1199,10 @@ fn cmd_menubar() -> Result<()> {
     let dictation_enabled = dictation_manager.is_enabled();
 
     // Start dictation if available
+    logging::log(&format!("[dictation] available={}, enabled={}", dictation_available, dictation_enabled));
     if dictation_available {
         if let Err(e) = dictation_manager.start() {
-            eprintln!("[dictation] Failed to start: {}", e);
+            logging::log(&format!("[dictation] Failed to start: {}", e));
         }
     }
 
@@ -1573,9 +1572,11 @@ fn cmd_uninstall() -> Result<()> {
     let settings_file = home.join(".claude").join("settings.json");
     let launch_agents_dir = home.join("Library/LaunchAgents");
 
+    // Remove hook scripts
     let _ = fs::remove_file(hooks_dir.join("prevent-sleep.sh"));
     let _ = fs::remove_file(hooks_dir.join("allow-sleep.sh"));
 
+    // Remove hooks from settings.json
     if settings_file.exists() {
         if let Ok(content) = fs::read_to_string(&settings_file) {
             if let Ok(mut json) = serde_json::from_str::<serde_json::Value>(&content) {
@@ -1588,6 +1589,7 @@ fn cmd_uninstall() -> Result<()> {
         }
     }
 
+    // Remove LaunchAgent
     let plist_path = launch_agents_dir.join("com.charlontank.claude-sleep-preventer.plist");
     if plist_path.exists() {
         let _ = Command::new("launchctl")
@@ -1597,15 +1599,34 @@ fn cmd_uninstall() -> Result<()> {
         println!("Removed LaunchAgent");
     }
 
+    // Remove sudoers config
     Command::new("sudo")
         .args(["rm", "-f", "/etc/sudoers.d/claude-pmset"])
         .output()?;
 
+    // Remove PID tracking directory
     let _ = fs::remove_dir_all(PIDS_DIR);
 
+    // Reset sleep settings
     Command::new("sudo")
         .args(["pmset", "-a", "disablesleep", "0"])
         .output()?;
+
+    // Remove app data and preferences
+    let app_support = home.join("Library/Application Support/ClaudeSleepPreventer");
+    let _ = fs::remove_dir_all(&app_support);
+    println!("Removed app data");
+
+    // Remove logs
+    let logs_dir = home.join("Library/Logs/ClaudeSleepPreventer");
+    let _ = fs::remove_dir_all(&logs_dir);
+    println!("Removed logs");
+
+    // Remove the app from /Applications
+    Command::new("sudo")
+        .args(["rm", "-rf", "/Applications/ClaudeSleepPreventer.app"])
+        .output()?;
+    println!("Removed app from /Applications");
 
     println!("✅ Uninstalled successfully");
 

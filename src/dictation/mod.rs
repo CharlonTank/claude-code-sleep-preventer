@@ -1,12 +1,15 @@
 mod audio;
 mod globe_key;
+mod onboarding;
 mod overlay;
 mod text_injection;
 mod transcription;
 
+pub use onboarding::run_onboarding_if_needed;
 pub use transcription::run_dictation_setup;
 
-use audio::AudioRecorder;
+use crate::logging;
+use audio::{check_and_request_microphone_permission, AudioRecorder, MicrophonePermission};
 use globe_key::{GlobeKeyEvent, GlobeKeyManager};
 use overlay::{OverlayMode, RecordingOverlay};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -54,6 +57,21 @@ impl DictationManager {
                 "Whisper not available. Install with: brew install whisper-cpp".to_string(),
             );
         }
+
+        // Check/request microphone permission
+        let mic_permission = check_and_request_microphone_permission();
+        logging::log(&format!("[dictation] Microphone permission: {:?}", mic_permission));
+
+        match mic_permission {
+            MicrophonePermission::Granted => {}
+            MicrophonePermission::Requesting => {
+                logging::log("[dictation] Requesting microphone permission...");
+            }
+            MicrophonePermission::Denied => {
+                logging::log("[dictation] Microphone permission denied");
+            }
+        }
+
         self.globe_key.start()
     }
 
@@ -95,7 +113,7 @@ impl DictationManager {
         while let Some(event) = self.globe_key.try_recv() {
             match event {
                 GlobeKeyEvent::Ready => {
-                    eprintln!("[dictation] Globe key listener ready");
+                    logging::log("[dictation] Globe key listener ready");
                 }
                 GlobeKeyEvent::DictateStart => {
                     if self.state == DictationState::Idle {
@@ -115,16 +133,16 @@ impl DictationManager {
             if let Some(rx) = &self.result_rx {
                 match rx.try_recv() {
                     Ok(DictationResult::Transcribed(text)) => {
-                        eprintln!("[dictation] Transcription: {}", text);
+                        logging::log(&format!("[dictation] Transcription: {}", text));
                         self.overlay.hide();
                         if let Err(e) = text_injection::inject_text(&text) {
-                            eprintln!("[dictation] Failed to inject text: {}", e);
+                            logging::log(&format!("[dictation] Failed to inject text: {}", e));
                         }
                         self.state = DictationState::Idle;
                         self.result_rx = None;
                     }
                     Ok(DictationResult::Error(e)) => {
-                        eprintln!("[dictation] Transcription error: {}", e);
+                        logging::log(&format!("[dictation] Transcription error: {}", e));
                         self.overlay.hide();
                         self.state = DictationState::Idle;
                         self.result_rx = None;
@@ -133,7 +151,7 @@ impl DictationManager {
                         // Still processing
                     }
                     Err(mpsc::TryRecvError::Disconnected) => {
-                        eprintln!("[dictation] Transcription channel disconnected");
+                        logging::log("[dictation] Transcription channel disconnected");
                         self.overlay.hide();
                         self.state = DictationState::Idle;
                         self.result_rx = None;
@@ -148,13 +166,13 @@ impl DictationManager {
         match AudioRecorder::new() {
             Ok(mut recorder) => {
                 if let Err(e) = recorder.start_recording() {
-                    eprintln!("[dictation] Failed to start recording: {}", e);
+                    logging::log(&format!("[dictation] Failed to start recording: {}", e));
                     return;
                 }
                 self.recorder = Some(recorder);
             }
             Err(e) => {
-                eprintln!("[dictation] Failed to create recorder: {}", e);
+                logging::log(&format!("[dictation] Failed to create recorder: {}", e));
                 return;
             }
         }
@@ -162,7 +180,7 @@ impl DictationManager {
         // Show overlay
         self.overlay.show();
         self.state = DictationState::Recording;
-        eprintln!("[dictation] Recording started");
+        logging::log("[dictation] Recording started");
     }
 
     fn stop_and_transcribe(&mut self) {
@@ -173,7 +191,7 @@ impl DictationManager {
         let samples = match self.recorder.as_mut() {
             Some(recorder) => recorder.stop_recording(),
             None => {
-                eprintln!("[dictation] No recorder available");
+                logging::log("[dictation] No recorder available");
                 self.overlay.hide();
                 self.state = DictationState::Idle;
                 return;
@@ -181,11 +199,19 @@ impl DictationManager {
         };
 
         if samples.is_empty() {
-            eprintln!("[dictation] No audio recorded");
+            logging::log("[dictation] No audio recorded");
             self.overlay.hide();
             self.state = DictationState::Idle;
             return;
         }
+
+        // Log audio stats
+        let duration_secs = samples.len() as f32 / 48000.0; // Assuming 48kHz
+        logging::log(&format!(
+            "[dictation] Audio: {} samples, ~{:.1}s duration",
+            samples.len(),
+            duration_secs
+        ));
 
         // Save to temp file
         let temp_dir = std::env::temp_dir();
@@ -193,7 +219,7 @@ impl DictationManager {
 
         let recorder = self.recorder.take().unwrap();
         if let Err(e) = recorder.save_to_wav(&samples, &audio_path) {
-            eprintln!("[dictation] Failed to save audio: {}", e);
+            logging::log(&format!("[dictation] Failed to save audio: {}", e));
             self.overlay.hide();
             self.state = DictationState::Idle;
             return;
@@ -217,7 +243,7 @@ impl DictationManager {
             let _ = tx.send(result);
         });
 
-        eprintln!("[dictation] Recording stopped, transcribing...");
+        logging::log("[dictation] Recording stopped, transcribing...");
     }
 }
 

@@ -1,8 +1,83 @@
-use std::io::{BufRead, BufReader};
-use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
-use std::sync::mpsc::{self, Receiver, TryRecvError};
+use crate::logging;
+use core_foundation::base::TCFType;
+use core_foundation::runloop::{kCFRunLoopDefaultMode, CFRunLoop};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::Arc;
 use std::thread;
+
+// Raw FFI bindings to Core Graphics
+mod ffi {
+    use std::ffi::c_void;
+
+    pub type CGEventRef = *mut c_void;
+    pub type CGEventTapProxy = *mut c_void;
+    pub type CFMachPortRef = *mut c_void;
+    pub type CFRunLoopSourceRef = *mut c_void;
+
+    pub type CGEventType = u32;
+    pub const kCGEventFlagsChanged: CGEventType = 12;
+    pub const kCGEventTapDisabledByTimeout: CGEventType = 0xFFFFFFFE;
+    pub const kCGEventTapDisabledByUserInput: CGEventType = 0xFFFFFFFF;
+
+    pub type CGEventFlags = u64;
+    pub const kCGEventFlagMaskSecondaryFn: CGEventFlags = 0x00800000;
+    pub const kCGEventFlagMaskShift: CGEventFlags = 0x00020000;
+
+    pub type CGEventTapLocation = u32;
+    pub const kCGSessionEventTap: CGEventTapLocation = 1;
+
+    pub type CGEventTapPlacement = u32;
+    pub const kCGHeadInsertEventTap: CGEventTapPlacement = 0;
+
+    pub type CGEventTapOptions = u32;
+    pub const kCGEventTapOptionListenOnly: CGEventTapOptions = 1;
+
+    pub type CGEventMask = u64;
+
+    pub type CGEventTapCallBack = extern "C" fn(
+        proxy: CGEventTapProxy,
+        event_type: CGEventType,
+        event: CGEventRef,
+        user_info: *mut c_void,
+    ) -> CGEventRef;
+
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        pub fn CGEventTapCreate(
+            tap: CGEventTapLocation,
+            place: CGEventTapPlacement,
+            options: CGEventTapOptions,
+            events_of_interest: CGEventMask,
+            callback: CGEventTapCallBack,
+            user_info: *mut c_void,
+        ) -> CFMachPortRef;
+
+        pub fn CGEventTapEnable(tap: CFMachPortRef, enable: bool);
+        pub fn CGEventGetFlags(event: CGEventRef) -> CGEventFlags;
+    }
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        pub fn CFMachPortCreateRunLoopSource(
+            allocator: *const c_void,
+            port: CFMachPortRef,
+            order: i64,
+        ) -> CFRunLoopSourceRef;
+
+        pub fn CFRunLoopAddSource(
+            rl: *const c_void,
+            source: CFRunLoopSourceRef,
+            mode: *const c_void,
+        );
+
+        pub fn CFRunLoopRunInMode(
+            mode: *const c_void,
+            seconds: f64,
+            return_after_source_handled: bool,
+        ) -> i32;
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum GlobeKeyEvent {
@@ -12,104 +87,46 @@ pub enum GlobeKeyEvent {
 }
 
 pub struct GlobeKeyManager {
-    child: Option<Child>,
     event_rx: Option<Receiver<GlobeKeyEvent>>,
-    last_error: Option<String>,
+    stop_flag: Option<Arc<AtomicBool>>,
+    thread_handle: Option<thread::JoinHandle<()>>,
 }
 
 impl GlobeKeyManager {
     pub fn new() -> Self {
         Self {
-            child: None,
             event_rx: None,
-            last_error: None,
+            stop_flag: None,
+            thread_handle: None,
         }
     }
 
     pub fn start(&mut self) -> Result<(), String> {
-        if self.child.is_some() {
+        if self.event_rx.is_some() {
             return Ok(());
         }
 
-        let binary_path = Self::find_binary()?;
         let (tx, rx) = mpsc::channel();
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let stop_flag_clone = stop_flag.clone();
 
-        let mut child = Command::new(&binary_path)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("Failed to spawn globe listener: {}", e))?;
-
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or("Failed to get stdout from globe listener")?;
-
-        thread::spawn(move || {
-            let reader = BufReader::new(stdout);
-            for line in reader.lines().flatten() {
-                let event = match line.trim() {
-                    "READY" => Some(GlobeKeyEvent::Ready),
-                    "DICTATE_START" => Some(GlobeKeyEvent::DictateStart),
-                    "DICTATE_STOP" => Some(GlobeKeyEvent::DictateStop),
-                    _ => None,
-                };
-                if let Some(evt) = event {
-                    if tx.send(evt).is_err() {
-                        break;
-                    }
-                }
-            }
+        let handle = thread::spawn(move || {
+            run_event_tap(tx, stop_flag_clone);
         });
 
-        self.child = Some(child);
         self.event_rx = Some(rx);
-        self.last_error = None;
+        self.stop_flag = Some(stop_flag);
+        self.thread_handle = Some(handle);
+
         Ok(())
     }
 
     pub fn stop(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
+        if let Some(flag) = self.stop_flag.take() {
+            flag.store(true, Ordering::SeqCst);
         }
+        self.thread_handle.take();
         self.event_rx = None;
-    }
-
-    fn find_binary() -> Result<PathBuf, String> {
-        // Try multiple locations
-        let exe_path = std::env::current_exe().ok();
-
-        let candidates: Vec<PathBuf> = vec![
-            // Development: relative to working directory
-            PathBuf::from("target/globe-listener"),
-            PathBuf::from("target/release/globe-listener"),
-            PathBuf::from("target/debug/globe-listener"),
-            // Bundled in app (next to the executable)
-            exe_path
-                .as_ref()
-                .and_then(|p| p.parent())
-                .map(|p| p.join("globe-listener"))
-                .unwrap_or_default(),
-            // Inside .app bundle
-            exe_path
-                .as_ref()
-                .and_then(|p| p.parent())
-                .and_then(|p| p.parent())
-                .map(|p| p.join("Resources/globe-listener"))
-                .unwrap_or_default(),
-        ];
-
-        for path in &candidates {
-            if path.exists() && !path.as_os_str().is_empty() {
-                return Ok(path.clone());
-            }
-        }
-
-        Err(format!(
-            "Globe listener binary not found. Searched: {:?}",
-            candidates
-        ))
     }
 
     pub fn try_recv(&self) -> Option<GlobeKeyEvent> {
@@ -119,18 +136,140 @@ impl GlobeKeyManager {
             Err(TryRecvError::Disconnected) => None,
         })
     }
-
-    pub fn is_running(&self) -> bool {
-        self.child.is_some()
-    }
-
-    pub fn last_error(&self) -> Option<&str> {
-        self.last_error.as_deref()
-    }
 }
 
 impl Drop for GlobeKeyManager {
     fn drop(&mut self) {
         self.stop();
     }
+}
+
+// Global state for callback (necessary because C callbacks can't capture Rust closures)
+static mut CALLBACK_STATE: Option<CallbackState> = None;
+
+struct CallbackState {
+    fn_down: bool,
+    shift_down: bool,
+    is_dictating: bool,
+    tx: Sender<GlobeKeyEvent>,
+}
+
+extern "C" fn event_tap_callback(
+    _proxy: ffi::CGEventTapProxy,
+    event_type: ffi::CGEventType,
+    event: ffi::CGEventRef,
+    _user_info: *mut std::ffi::c_void,
+) -> ffi::CGEventRef {
+    // Re-enable tap if disabled
+    if event_type == ffi::kCGEventTapDisabledByTimeout
+        || event_type == ffi::kCGEventTapDisabledByUserInput
+    {
+        return event;
+    }
+
+    if event_type != ffi::kCGEventFlagsChanged {
+        return event;
+    }
+
+    unsafe {
+        if let Some(state) = CALLBACK_STATE.as_mut() {
+            let flags = ffi::CGEventGetFlags(event);
+
+            let fn_down = (flags & ffi::kCGEventFlagMaskSecondaryFn) != 0;
+            let shift_down = (flags & ffi::kCGEventFlagMaskShift) != 0;
+
+            state.fn_down = fn_down;
+            state.shift_down = shift_down;
+
+            let should_dictate = fn_down && shift_down;
+            let was_dictating = state.is_dictating;
+
+            if should_dictate && !was_dictating {
+                state.is_dictating = true;
+                let _ = state.tx.send(GlobeKeyEvent::DictateStart);
+            } else if !should_dictate && was_dictating {
+                state.is_dictating = false;
+                let _ = state.tx.send(GlobeKeyEvent::DictateStop);
+            }
+        }
+    }
+
+    event
+}
+
+fn run_event_tap(tx: Sender<GlobeKeyEvent>, stop_flag: Arc<AtomicBool>) {
+    logging::log("[globe_key] Starting native CGEventTap...");
+
+    // Initialize global callback state
+    unsafe {
+        CALLBACK_STATE = Some(CallbackState {
+            fn_down: false,
+            shift_down: false,
+            is_dictating: false,
+            tx: tx.clone(),
+        });
+    }
+
+    // Event mask for flags changed
+    let event_mask: ffi::CGEventMask = 1 << ffi::kCGEventFlagsChanged;
+
+    // Create event tap
+    let tap = unsafe {
+        ffi::CGEventTapCreate(
+            ffi::kCGSessionEventTap,
+            ffi::kCGHeadInsertEventTap,
+            ffi::kCGEventTapOptionListenOnly,
+            event_mask,
+            event_tap_callback,
+            std::ptr::null_mut(),
+        )
+    };
+
+    if tap.is_null() {
+        logging::log(
+            "[globe_key] ERROR: Failed to create CGEventTap - Input Monitoring permission required",
+        );
+        return;
+    }
+
+    // Enable the tap
+    unsafe {
+        ffi::CGEventTapEnable(tap, true);
+    }
+
+    // Create run loop source
+    let source = unsafe { ffi::CFMachPortCreateRunLoopSource(std::ptr::null(), tap, 0) };
+
+    if source.is_null() {
+        logging::log("[globe_key] ERROR: Failed to create run loop source");
+        return;
+    }
+
+    // Add to current run loop
+    let run_loop = CFRunLoop::get_current();
+    unsafe {
+        ffi::CFRunLoopAddSource(
+            run_loop.as_concrete_TypeRef() as *const _,
+            source,
+            kCFRunLoopDefaultMode as *const _,
+        );
+    }
+
+    // Signal ready
+    let _ = tx.send(GlobeKeyEvent::Ready);
+    logging::log("[globe_key] Native CGEventTap ready, listening for Fn+Shift...");
+
+    // Run the event loop
+    while !stop_flag.load(Ordering::SeqCst) {
+        unsafe {
+            ffi::CFRunLoopRunInMode(kCFRunLoopDefaultMode as *const _, 0.1, true);
+        }
+    }
+
+    // Cleanup
+    unsafe {
+        CALLBACK_STATE = None;
+    }
+
+    logging::log("[globe_key] CGEventTap stopped");
 }

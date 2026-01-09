@@ -1,6 +1,6 @@
 [package]
 name = "claude-sleep-preventer"
-version = "2.3.0"
+version = "2.5.0"
 edition = "2021"
 description = "Keep your Mac awake while Claude Code is working"
 license = "MIT"
@@ -25,6 +25,7 @@ cpal = "0.15"       # Audio recording
 hound = "3.5"       # WAV file writing
 cocoa = "0.26"      # NSWindow manipulation for overlay
 objc = "0.2"        # Objective-C runtime
+core-graphics = "0.24"  # CGEventTap for key monitoring
 
 [profile.release]
 strip = true

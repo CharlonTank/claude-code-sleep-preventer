@@ -1,7 +1,53 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use hound::{SampleFormat, WavSpec, WavWriter};
+use objc::{class, msg_send, sel, sel_impl};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+
+// Link AVFoundation framework
+#[link(name = "AVFoundation", kind = "framework")]
+extern "C" {}
+
+/// Check and request microphone permission using AVFoundation
+pub fn check_and_request_microphone_permission() -> MicrophonePermission {
+    unsafe {
+        // AVMediaTypeAudio = "soun"
+        let media_type: *mut objc::runtime::Object =
+            msg_send![class!(NSString), stringWithUTF8String: b"soun\0".as_ptr()];
+
+        // Check current authorization status
+        let status: i64 = msg_send![class!(AVCaptureDevice), authorizationStatusForMediaType: media_type];
+
+        match status {
+            0 => {
+                // AVAuthorizationStatusNotDetermined - need to request
+                request_microphone_access();
+                MicrophonePermission::Requesting
+            }
+            1 => MicrophonePermission::Denied,  // AVAuthorizationStatusRestricted
+            2 => MicrophonePermission::Denied,  // AVAuthorizationStatusDenied
+            3 => MicrophonePermission::Granted, // AVAuthorizationStatusAuthorized
+            _ => MicrophonePermission::Denied,
+        }
+    }
+}
+
+fn request_microphone_access() {
+    unsafe {
+        let media_type: *mut objc::runtime::Object =
+            msg_send![class!(NSString), stringWithUTF8String: b"soun\0".as_ptr()];
+
+        // Request access - this triggers the system dialog
+        let _: () = msg_send![class!(AVCaptureDevice), requestAccessForMediaType: media_type completionHandler: std::ptr::null::<objc::runtime::Object>()];
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MicrophonePermission {
+    Granted,
+    Denied,
+    Requesting,
+}
 
 pub struct AudioRecorder {
     samples: Arc<Mutex<Vec<f32>>>,

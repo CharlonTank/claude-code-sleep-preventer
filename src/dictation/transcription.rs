@@ -3,6 +3,8 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
+use crate::native_dialogs;
+
 const MODEL_URL: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin";
 const MODEL_FILENAME: &str = "ggml-medium.bin";
 
@@ -170,25 +172,11 @@ pub fn run_dictation_setup() {
 }
 
 fn show_dialog(message: &str, title: &str) {
-    let script = format!(
-        r#"display dialog "{}" buttons {{"OK"}} default button "OK" with title "{}""#,
-        message.replace('"', "\\\"").replace('\n', "\\n"),
-        title
-    );
-    let _ = Command::new("osascript").args(["-e", &script]).output();
+    native_dialogs::show_dialog(message, title);
 }
 
 fn confirm_dialog(message: &str, title: &str) -> bool {
-    let script = format!(
-        r#"display dialog "{}" buttons {{"Cancel", "Continue"}} default button "Continue" with title "{}""#,
-        message.replace('"', "\\\"").replace('\n', "\\n"),
-        title
-    );
-    Command::new("osascript")
-        .args(["-e", &script])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    native_dialogs::show_confirm_dialog(message, title, "Continue", "Cancel")
 }
 
 fn download_model() {
@@ -237,9 +225,5 @@ fn download_model() {
 
 fn show_progress(message: &str) {
     // Use notification instead of blocking dialog
-    let script = format!(
-        r#"display notification "{}" with title "Claude Sleep Preventer""#,
-        message.replace('"', "\\\"").replace('\n', " ")
-    );
-    let _ = Command::new("osascript").args(["-e", &script]).output();
+    native_dialogs::show_notification(message, "Claude Sleep Preventer");
 }
