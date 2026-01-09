@@ -106,24 +106,42 @@ fn setup_microphone() {
         MicrophonePermission::Granted => {
             logging::log("[onboarding] Microphone already granted");
         }
-        MicrophonePermission::Requesting | MicrophonePermission::Denied => {
-            let message = r#"Étape 2/3 : Microphone
+        MicrophonePermission::Requesting => {
+            // System dialog will appear - just tell user to accept it
+            show_dialog(
+                "Étape 2/3 : Microphone\n\nUne demande d'accès au microphone va apparaître.\n\nCliquez \"OK\" dans cette fenêtre système pour autoriser l'accès.",
+                "Microphone",
+            );
 
-Cette permission permet à l'app d'enregistrer votre voix pour la dictée.
+            // Give time for user to respond, then check again
+            std::thread::sleep(std::time::Duration::from_millis(500));
+
+            // Re-check status
+            let new_status = check_and_request_microphone_permission();
+            if new_status == MicrophonePermission::Denied {
+                open_microphone_settings();
+            }
+        }
+        MicrophonePermission::Denied => {
+            open_microphone_settings();
+        }
+    }
+}
+
+fn open_microphone_settings() {
+    let message = r#"L'accès au microphone a été refusé.
 
 Cliquez "Ouvrir" pour accéder aux réglages, puis :
 1. Trouvez "Claude Sleep Preventer"
 2. Activez l'accès au microphone
 3. Revenez ici"#;
 
-            if show_confirm_dialog(message, "Microphone", "Ouvrir", "Passer") {
-                let _ = Command::new("open")
-                    .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")
-                    .spawn();
+    if show_confirm_dialog(message, "Microphone", "Ouvrir", "Passer") {
+        let _ = Command::new("open")
+            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")
+            .spawn();
 
-                show_dialog("Cliquez OK une fois que vous avez activé le microphone.", "Microphone");
-            }
-        }
+        show_dialog("Cliquez OK une fois que vous avez activé le microphone.", "Microphone");
     }
 }
 
