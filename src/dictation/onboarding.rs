@@ -106,21 +106,15 @@ fn setup_microphone() {
         MicrophonePermission::Granted => {
             logging::log("[onboarding] Microphone already granted");
         }
-        MicrophonePermission::Requesting => {
-            // Dialog will appear automatically from AVFoundation
-            show_dialog(
-                "Étape 2/3 : Microphone\n\nUne demande de permission va apparaître.\nCliquez \"OK\" pour l'autoriser.",
-                "Microphone",
-            );
-        }
-        MicrophonePermission::Denied => {
+        MicrophonePermission::Requesting | MicrophonePermission::Denied => {
             let message = r#"Étape 2/3 : Microphone
 
-La permission microphone a été refusée.
+Cette permission permet à l'app d'enregistrer votre voix pour la dictée.
 
 Cliquez "Ouvrir" pour accéder aux réglages, puis :
 1. Trouvez "Claude Sleep Preventer"
-2. Activez l'accès au microphone"#;
+2. Activez l'accès au microphone
+3. Revenez ici"#;
 
             if show_confirm_dialog(message, "Microphone", "Ouvrir", "Passer") {
                 let _ = Command::new("open")
