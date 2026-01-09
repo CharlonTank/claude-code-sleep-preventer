@@ -106,30 +106,18 @@ fn setup_microphone() {
         MicrophonePermission::Granted => {
             logging::log("[onboarding] Microphone already granted");
         }
-        MicrophonePermission::Requesting => {
-            // System dialog will appear - just tell user to accept it
-            show_dialog(
-                "Étape 2/3 : Microphone\n\nUne demande d'accès au microphone va apparaître.\n\nCliquez \"OK\" dans cette fenêtre système pour autoriser l'accès.",
-                "Microphone",
-            );
-
-            // Give time for user to respond, then check again
-            std::thread::sleep(std::time::Duration::from_millis(500));
-
-            // Re-check status
-            let new_status = check_and_request_microphone_permission();
-            if new_status == MicrophonePermission::Denied {
-                open_microphone_settings();
-            }
-        }
-        MicrophonePermission::Denied => {
+        MicrophonePermission::Requesting | MicrophonePermission::Denied => {
+            // Request adds the app to the list, then we open System Preferences
+            // The system dialog is unreliable, so we guide user manually
             open_microphone_settings();
         }
     }
 }
 
 fn open_microphone_settings() {
-    let message = r#"L'accès au microphone a été refusé.
+    let message = r#"Étape 2/3 : Microphone
+
+Cette permission permet à l'app d'enregistrer votre voix pour la dictée.
 
 Cliquez "Ouvrir" pour accéder aux réglages, puis :
 1. Trouvez "Claude Sleep Preventer"
