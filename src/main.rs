@@ -101,7 +101,11 @@ enum Commands {
     /// Check thermal state
     Thermal,
     /// Install hooks and configure Claude Code
-    Install,
+    Install {
+        /// Skip confirmation prompt
+        #[arg(short, long)]
+        yes: bool,
+    },
     /// Uninstall hooks and restore defaults
     Uninstall,
     /// Debug: list process names
@@ -120,7 +124,7 @@ fn main() -> Result<()> {
         Commands::Menubar => cmd_menubar()?,
         Commands::Reset => cmd_reset()?,
         Commands::Thermal => cmd_thermal()?,
-        Commands::Install => cmd_install()?,
+        Commands::Install { yes } => cmd_install(yes)?,
         Commands::Uninstall => cmd_uninstall()?,
         Commands::Debug => cmd_debug()?,
     }
@@ -821,7 +825,7 @@ Administrator password required.";
         return Ok(());
     }
 
-    let script = "echo 'y' | /Applications/ClaudeSleepPreventer.app/Contents/MacOS/claude-sleep-preventer install";
+    let script = "/Applications/ClaudeSleepPreventer.app/Contents/MacOS/claude-sleep-preventer install --yes";
 
     match authorization::execute_script_with_privileges(script) {
         Ok(true) => {
@@ -1436,7 +1440,7 @@ fn ask_yes_no(prompt: &str) -> bool {
     answer.is_empty() || answer == "y" || answer == "yes"
 }
 
-fn cmd_install() -> Result<()> {
+fn cmd_install(auto_yes: bool) -> Result<()> {
     let home = dirs::home_dir().context("Could not find home directory")?;
     let hooks_dir = home.join(".claude").join("hooks");
     let settings_file = home.join(".claude").join("settings.json");
@@ -1522,7 +1526,7 @@ fn cmd_install() -> Result<()> {
         .output()?;
 
     println!();
-    if ask_yes_no("Launch menu bar app at login?") {
+    if auto_yes || ask_yes_no("Launch menu bar app at login?") {
         fs::create_dir_all(&launch_agents_dir)?;
 
         let plist = r#"<?xml version="1.0" encoding="UTF-8"?>
