@@ -3,9 +3,10 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use crate::logging;
-use crate::native_dialogs;
+use crate::native_dialogs::{self, PermissionToggle, PermissionsAction, PermissionsWindow};
 
 use super::audio::{check_microphone_permission, request_microphone_permission_sync, MicrophonePermission};
+use super::globe_key::check_input_monitoring_permission;
 use super::text_injection::check_accessibility_permission;
 use super::transcription::{WhisperTranscriber, DictationSetupStatus};
 
@@ -40,176 +41,124 @@ pub fn run_onboarding_if_needed() {
 
     let welcome_message = r#"Bienvenue dans Claude Sleep Preventer !
 
-Pour utiliser la dictée vocale (Fn+Shift), l'app a besoin de :
+Pour utiliser la dictée vocale (Fn+Shift), activez ces permissions :
+Input Monitoring
+Microphone
+Accessibility
 
-• Input Monitoring - pour détecter les touches
-• Microphone - pour enregistrer votre voix
-• Accessibility - pour écrire le texte
-• Modèle Whisper - pour la reconnaissance vocale (~500 Mo)
+Cliquez sur un interrupteur pour ouvrir le réglage correspondant."#;
 
-Cliquez "Configurer" pour les activer."#;
-
-    let window = native_dialogs::SetupWindow::new("Configuration requise", welcome_message);
-    window.set_primary_button("Configurer");
+    let window = PermissionsWindow::new("Configuration requise", welcome_message);
+    window.set_primary_button("Continuer");
     window.set_secondary_button("Plus tard");
     window.set_secondary_visible(true);
 
-    if window.wait_for_action() == native_dialogs::SetupAction::Secondary {
-        window.close();
-        logging::log("[onboarding] User skipped onboarding");
-        return;
+    loop {
+        update_permission_toggles(&window);
+        match window.wait_for_action() {
+            PermissionsAction::Primary => {
+                window.close();
+                break;
+            }
+            PermissionsAction::Secondary => {
+                window.close();
+                logging::log("[onboarding] User skipped onboarding");
+                return;
+            }
+            PermissionsAction::Toggle(toggle) => {
+                handle_permission_toggle(toggle);
+            }
+        }
     }
 
-    setup_input_monitoring(&window);
-    setup_microphone(&window);
-    setup_accessibility(&window);
-    setup_whisper_model(&window);
+    let model_window =
+        native_dialogs::SetupWindow::new("Modèle Whisper", "Vérification du modèle...");
+    setup_whisper_model(&model_window);
 
     let final_message = if WhisperTranscriber::new().setup_status() == DictationSetupStatus::Ready {
         "Configuration terminée !\n\nAppuyez sur Fn+Shift pour dicter du texte."
     } else {
         "Configuration terminée !\n\nPour activer la dictée, allez dans le menu et cliquez sur 'Setup Dictation...' pour télécharger le modèle Whisper."
     };
-    window.set_title("Prêt !");
-    window.set_message(final_message);
-    window.set_primary_button("OK");
-    window.set_secondary_visible(false);
-    window.wait_for_action();
-    window.close();
+    model_window.set_title("Prêt !");
+    model_window.set_message(final_message);
+    model_window.set_primary_button("OK");
+    model_window.set_secondary_visible(false);
+    model_window.wait_for_action();
+    model_window.close();
 
     mark_onboarding_complete();
     logging::log("[onboarding] Setup complete");
 }
 
-fn setup_input_monitoring(window: &native_dialogs::SetupWindow) {
-    window.show_progress(false);
-    // We can't programmatically check Input Monitoring permission,
-    // so we just guide the user to enable it
-    let message = r#"Étape 1/4 : Input Monitoring
-
-Cette permission permet à l'app de détecter quand vous appuyez sur Fn+Shift.
-
-Cliquez "Ouvrir" pour accéder aux réglages, puis :
-1. Cliquez le cadenas pour déverrouiller
-2. Cochez "Claude Sleep Preventer"
-3. Revenez ici"#;
-
-    window.set_title("Input Monitoring");
-    window.set_message(message);
-    window.set_primary_button("Ouvrir");
-    window.set_secondary_button("Passer");
-    window.set_secondary_visible(true);
-
-    if window.wait_for_action() == native_dialogs::SetupAction::Primary {
-        // Open System Preferences to Input Monitoring
-        let _ = Command::new("open")
-            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent")
-            .spawn();
-
-        // Wait for user to come back
-        window.set_message(
-            "Une fois que vous avez activé Input Monitoring, cliquez Continuer pour continuer.",
-        );
-        window.set_primary_button("Continuer");
-        window.set_secondary_visible(false);
-        window.wait_for_action();
-    }
+fn permission_label(name: &str, granted: bool) -> String {
+    let status = if granted { "OK" } else { "OFF" };
+    format!("{}: {}", name, status)
 }
 
-fn setup_microphone(window: &native_dialogs::SetupWindow) {
-    window.show_progress(false);
-    let mic_status = check_microphone_permission();
+fn update_permission_toggles(window: &PermissionsWindow) {
+    let input_ok = check_input_monitoring_permission();
+    let mic_ok = matches!(check_microphone_permission(), MicrophonePermission::Granted);
+    let accessibility_ok = check_accessibility_permission();
 
-    match mic_status {
-        MicrophonePermission::Granted => {
-            logging::log("[onboarding] Microphone already granted");
+    window.set_toggle(
+        PermissionToggle::InputMonitoring,
+        &permission_label("Input Monitoring", input_ok),
+        input_ok,
+    );
+    window.set_toggle(
+        PermissionToggle::Microphone,
+        &permission_label("Microphone", mic_ok),
+        mic_ok,
+    );
+    window.set_toggle(
+        PermissionToggle::Accessibility,
+        &permission_label("Accessibility", accessibility_ok),
+        accessibility_ok,
+    );
+}
+
+fn handle_permission_toggle(toggle: PermissionToggle) {
+    match toggle {
+        PermissionToggle::InputMonitoring => {
+            open_input_monitoring_settings();
         }
-        MicrophonePermission::NotDetermined => {
-            let message = "Étape 2/4 : Microphone\n\nUne demande d'accès au microphone va apparaître.\n\nCliquez \"Autoriser\" pour activer la dictée vocale.";
-            window.set_title("Microphone");
-            window.set_message(message);
-            window.set_primary_button("Autoriser");
-            window.set_secondary_button("Passer");
-            window.set_secondary_visible(true);
-
-            if window.wait_for_action() != native_dialogs::SetupAction::Primary {
-                return;
+        PermissionToggle::Microphone => {
+            let mut status = check_microphone_permission();
+            if status == MicrophonePermission::NotDetermined {
+                let granted = request_microphone_permission_sync();
+                status = if granted {
+                    MicrophonePermission::Granted
+                } else {
+                    MicrophonePermission::Denied
+                };
             }
-
-            let granted = request_microphone_permission_sync();
-            if granted {
-                logging::log("[onboarding] Microphone permission granted");
-            } else {
-                logging::log("[onboarding] Microphone permission denied");
-                open_microphone_settings(window);
+            if status != MicrophonePermission::Granted {
+                open_microphone_settings();
             }
         }
-        MicrophonePermission::Denied => {
-            open_microphone_settings(window);
+        PermissionToggle::Accessibility => {
+            open_accessibility_settings();
         }
     }
 }
 
-fn open_microphone_settings(window: &native_dialogs::SetupWindow) {
-    let message = r#"Étape 2/4 : Microphone
-
-Cette permission permet à l'app d'enregistrer votre voix pour la dictée.
-
-Cliquez "Ouvrir" pour accéder aux réglages, puis :
-1. Trouvez "Claude Sleep Preventer"
-2. Activez l'accès au microphone
-3. Revenez ici"#;
-
-    window.set_title("Microphone");
-    window.set_message(message);
-    window.set_primary_button("Ouvrir");
-    window.set_secondary_button("Passer");
-    window.set_secondary_visible(true);
-
-    if window.wait_for_action() == native_dialogs::SetupAction::Primary {
-        let _ = Command::new("open")
-            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")
-            .spawn();
-
-        window.set_message("Cliquez Continuer une fois que vous avez activé le microphone.");
-        window.set_primary_button("Continuer");
-        window.set_secondary_visible(false);
-        window.wait_for_action();
-    }
+fn open_input_monitoring_settings() {
+    let _ = Command::new("open")
+        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent")
+        .spawn();
 }
 
-fn setup_accessibility(window: &native_dialogs::SetupWindow) {
-    window.show_progress(false);
-    if check_accessibility_permission() {
-        logging::log("[onboarding] Accessibility already granted");
-        return;
-    }
+fn open_microphone_settings() {
+    let _ = Command::new("open")
+        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")
+        .spawn();
+}
 
-    let message = r#"Étape 3/4 : Accessibility
-
-Cette permission permet à l'app d'écrire le texte dicté dans n'importe quelle application.
-
-Cliquez "Ouvrir" pour accéder aux réglages, puis :
-1. Cliquez le cadenas pour déverrouiller
-2. Cochez "Claude Sleep Preventer"
-3. Revenez ici"#;
-
-    window.set_title("Accessibility");
-    window.set_message(message);
-    window.set_primary_button("Ouvrir");
-    window.set_secondary_button("Passer");
-    window.set_secondary_visible(true);
-
-    if window.wait_for_action() == native_dialogs::SetupAction::Primary {
-        let _ = Command::new("open")
-            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
-            .spawn();
-
-        window.set_message("Cliquez Continuer une fois que vous avez activé Accessibility.");
-        window.set_primary_button("Continuer");
-        window.set_secondary_visible(false);
-        window.wait_for_action();
-    }
+fn open_accessibility_settings() {
+    let _ = Command::new("open")
+        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
+        .spawn();
 }
 
 fn setup_whisper_model(window: &native_dialogs::SetupWindow) {

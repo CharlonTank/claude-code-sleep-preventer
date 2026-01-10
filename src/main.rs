@@ -838,6 +838,7 @@ Administrator password required.";
                 "Setup complete!\n\nRestart Claude Code to activate sleep prevention.",
                 "Claude Sleep Preventer",
             );
+            relaunch_app_after_install();
         }
         Ok(false) => {
             // User cancelled
@@ -851,6 +852,27 @@ Administrator password required.";
     }
 
     Ok(())
+}
+
+fn relaunch_app_after_install() {
+    logging::log("[main] Relaunching app after install...");
+    match Command::new("open")
+        .args(["-n", "/Applications/ClaudeSleepPreventer.app"])
+        .status()
+    {
+        Ok(status) if status.success() => {
+            std::process::exit(0);
+        }
+        Ok(status) => {
+            logging::log(&format!(
+                "[main] Relaunch failed with status: {}",
+                status
+            ));
+        }
+        Err(e) => {
+            logging::log(&format!("[main] Relaunch failed: {}", e));
+        }
+    }
 }
 
 fn run_uninstall_flow() -> Result<()> {

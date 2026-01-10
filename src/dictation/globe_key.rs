@@ -79,6 +79,8 @@ mod ffi {
             seconds: f64,
             return_after_source_handled: bool,
         ) -> i32;
+
+        pub fn CFRelease(cf: *const c_void);
     }
 }
 
@@ -189,6 +191,31 @@ pub fn take_diagnostics() -> GlobeKeyDiagnostics {
     }
 }
 
+pub fn check_input_monitoring_permission() -> bool {
+    let event_mask: ffi::CGEventMask = 1 << ffi::K_CG_EVENT_FLAGS_CHANGED;
+    let tap = unsafe {
+        ffi::CGEventTapCreate(
+            ffi::K_CG_SESSION_EVENT_TAP,
+            ffi::K_CG_HEAD_INSERT_EVENT_TAP,
+            ffi::K_CG_EVENT_TAP_OPTION_LISTEN_ONLY,
+            event_mask,
+            event_tap_probe_callback,
+            std::ptr::null_mut(),
+        )
+    };
+
+    if tap.is_null() {
+        return false;
+    }
+
+    unsafe {
+        ffi::CGEventTapEnable(tap, false);
+        ffi::CFRelease(tap as *const std::ffi::c_void);
+    }
+
+    true
+}
+
 struct CallbackState {
     fn_down: bool,
     shift_down: bool,
@@ -250,6 +277,15 @@ extern "C" fn event_tap_callback(
         }
     }
 
+    event
+}
+
+extern "C" fn event_tap_probe_callback(
+    _proxy: ffi::CGEventTapProxy,
+    _event_type: ffi::CGEventType,
+    event: ffi::CGEventRef,
+    _user_info: *mut std::ffi::c_void,
+) -> ffi::CGEventRef {
     event
 }
 
