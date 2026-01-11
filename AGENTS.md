@@ -22,6 +22,14 @@ Optional: keep Whisper models (~500 MB) and whisper-cli:
 cargo xtask clean --keep-model
 ```
 
+Default workflow after any code change:
+
+```bash
+cargo xtask complete-test --skip-notarize --keep-model
+```
+
+This cleans the system, builds the DMG, and opens it so the new app can be installed and launched.
+
 This removes:
 - App from /Applications
 - App data, logs, caches (optionally keeping models)
@@ -59,7 +67,7 @@ To publish a new version, prefer:
 
 - **Microphone**: App must call `AVCaptureDevice.requestAccessForMediaType:` to appear in System Preferences list. The system dialog triggers automatically.
 - **Accessibility**: Check with `AXIsProcessTrusted()`. Open preferences with `x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility`
-- **Input Monitoring**: Cannot be checked programmatically. Open preferences with `x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent`
+- **Input Monitoring**: Probe with a listen-only CGEventTap; open preferences with `x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent`
 
 ## AppleScript Gotchas
 

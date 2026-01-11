@@ -659,7 +659,6 @@ impl SetupWindow {
 #[derive(Clone, Copy)]
 pub struct PermissionsWindowHandle {
     window: SendPtr,
-    message: SendPtr,
     input_toggle: SendPtr,
     mic_toggle: SendPtr,
     accessibility_toggle: SendPtr,
@@ -668,26 +667,6 @@ pub struct PermissionsWindowHandle {
 }
 
 impl PermissionsWindowHandle {
-    pub fn set_message(&self, message: &str) {
-        let message = message.to_string();
-        let label = self.message;
-        run_on_main_async(move || unsafe {
-            let message_str = nsstring(&message);
-            let label = label.into_ptr() as Id;
-            let _: () = msg_send![label, setStringValue: message_str];
-        });
-    }
-
-    pub fn set_title(&self, title: &str) {
-        let title = title.to_string();
-        let window = self.window;
-        run_on_main_async(move || unsafe {
-            let title_str = nsstring(&title);
-            let window = window.into_ptr() as Id;
-            let _: () = msg_send![window, setTitle: title_str];
-        });
-    }
-
     pub fn set_primary_button(&self, title: &str) {
         let title = title.to_string();
         let button = self.primary_button;
@@ -854,7 +833,6 @@ impl PermissionsWindow {
             (
                 PermissionsWindowHandle {
                     window: SendPtr(window as *mut c_void),
-                    message: SendPtr(label as *mut c_void),
                     input_toggle: SendPtr(input_toggle as *mut c_void),
                     mic_toggle: SendPtr(mic_toggle as *mut c_void),
                     accessibility_toggle: SendPtr(accessibility_toggle as *mut c_void),
@@ -873,18 +851,6 @@ impl PermissionsWindow {
             target,
             previous_policy,
         }
-    }
-
-    pub fn handle(&self) -> PermissionsWindowHandle {
-        self.handle
-    }
-
-    pub fn set_title(&self, title: &str) {
-        self.handle.set_title(title);
-    }
-
-    pub fn set_message(&self, message: &str) {
-        self.handle.set_message(message);
     }
 
     pub fn set_primary_button(&self, title: &str) {
