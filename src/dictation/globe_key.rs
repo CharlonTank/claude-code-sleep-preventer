@@ -1,6 +1,8 @@
 use crate::logging;
+use crate::objc_utils;
 use core_foundation::base::TCFType;
 use core_foundation::runloop::{kCFRunLoopDefaultMode, CFRunLoop};
+use std::ffi::CString;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -16,6 +18,8 @@ mod ffi {
     pub type CFRunLoopSourceRef = *mut c_void;
 
     pub type CGEventType = u32;
+    pub const K_CG_EVENT_KEY_DOWN: CGEventType = 10;
+    pub const K_CG_EVENT_KEY_UP: CGEventType = 11;
     pub const K_CG_EVENT_FLAGS_CHANGED: CGEventType = 12;
     pub const K_CG_EVENT_TAP_DISABLED_BY_TIMEOUT: CGEventType = 0xFFFFFFFE;
     pub const K_CG_EVENT_TAP_DISABLED_BY_USER_INPUT: CGEventType = 0xFFFFFFFF;
@@ -74,13 +78,67 @@ mod ffi {
             mode: *const c_void,
         );
 
+        pub fn CFRunLoopRemoveSource(
+            rl: *const c_void,
+            source: CFRunLoopSourceRef,
+            mode: *const c_void,
+        );
+
         pub fn CFRunLoopRunInMode(
             mode: *const c_void,
             seconds: f64,
             return_after_source_handled: bool,
         ) -> i32;
 
+        pub fn CFMachPortInvalidate(port: CFMachPortRef);
+
         pub fn CFRelease(cf: *const c_void);
+    }
+}
+
+// Minimal IOHIDManager FFI to trigger Input Monitoring prompt on some systems.
+mod hid {
+    use std::ffi::c_void;
+
+    pub type IOHIDManagerRef = *mut c_void;
+    pub type IOOptionBits = u32;
+    pub type IOReturn = i32;
+
+    pub const K_IO_RETURN_SUCCESS: IOReturn = 0;
+
+    #[link(name = "IOKit", kind = "framework")]
+    extern "C" {
+        pub fn IOHIDManagerCreate(
+            allocator: *const c_void,
+            options: IOOptionBits,
+        ) -> IOHIDManagerRef;
+
+        pub fn IOHIDManagerSetDeviceMatching(
+            manager: IOHIDManagerRef,
+            matching: *const c_void,
+        );
+
+        pub fn IOHIDManagerOpen(
+            manager: IOHIDManagerRef,
+            options: IOOptionBits,
+        ) -> IOReturn;
+
+        pub fn IOHIDManagerClose(
+            manager: IOHIDManagerRef,
+            options: IOOptionBits,
+        ) -> IOReturn;
+
+        pub fn IOHIDManagerScheduleWithRunLoop(
+            manager: IOHIDManagerRef,
+            run_loop: *const c_void,
+            run_loop_mode: *const c_void,
+        );
+
+        pub fn IOHIDManagerUnscheduleFromRunLoop(
+            manager: IOHIDManagerRef,
+            run_loop: *const c_void,
+            run_loop_mode: *const c_void,
+        );
     }
 }
 
@@ -192,7 +250,76 @@ pub fn take_diagnostics() -> GlobeKeyDiagnostics {
 }
 
 pub fn check_input_monitoring_permission() -> bool {
-    let event_mask: ffi::CGEventMask = 1 << ffi::K_CG_EVENT_FLAGS_CHANGED;
+    if let Some(granted) = cg_preflight_listen_event_access() {
+        return granted;
+    }
+
+    match iohid_check_access(k_iohid_request_type_listen_event()) {
+        Some(access) => access == k_iohid_access_type_granted(),
+        None => true,
+    }
+}
+
+pub fn request_input_monitoring_permission() -> bool {
+    if check_input_monitoring_permission() {
+        return true;
+    }
+
+    let bundle_id = objc_utils::main_bundle_identifier().unwrap_or_else(|| "unknown".to_string());
+    let bundle_path = objc_utils::main_bundle_path().unwrap_or_else(|| "unknown".to_string());
+    logging::log(&format!(
+        "[input_monitoring] bundle id={}, path={}",
+        bundle_id, bundle_path
+    ));
+
+    logging::log("[input_monitoring] requesting listen access");
+
+    if let Some(granted) = cg_request_listen_event_access() {
+        logging::log(&format!(
+            "[input_monitoring] CGRequestListenEventAccess -> {}",
+            granted
+        ));
+        if granted {
+            return true;
+        }
+    } else {
+        logging::log("[input_monitoring] CGRequestListenEventAccess unavailable");
+    }
+
+    if let Some(granted) = iohid_request_access(k_iohid_request_type_listen_event()) {
+        logging::log(&format!(
+            "[input_monitoring] IOHIDRequestAccess -> {}",
+            granted
+        ));
+        if granted {
+            return true;
+        }
+    } else {
+        logging::log("[input_monitoring] IOHIDRequestAccess unavailable");
+    }
+
+    std::thread::spawn(|| {
+        let probe_ok = probe_input_monitoring_event_tap();
+        logging::log(&format!("[input_monitoring] probe event tap -> {}", probe_ok));
+
+        let hid_ok = probe_input_monitoring_iohid_manager();
+        logging::log(&format!("[input_monitoring] probe IOHIDManager -> {}", hid_ok));
+
+        let granted = check_input_monitoring_permission();
+        logging::log(&format!(
+            "[input_monitoring] granted after probe -> {}",
+            granted
+        ));
+    });
+
+    false
+}
+
+fn probe_input_monitoring_event_tap() -> bool {
+    let event_mask: ffi::CGEventMask =
+        (1u64 << ffi::K_CG_EVENT_KEY_DOWN)
+        | (1u64 << ffi::K_CG_EVENT_KEY_UP)
+        | (1u64 << ffi::K_CG_EVENT_FLAGS_CHANGED);
     let tap = unsafe {
         ffi::CGEventTapCreate(
             ffi::K_CG_SESSION_EVENT_TAP,
@@ -208,12 +335,156 @@ pub fn check_input_monitoring_permission() -> bool {
         return false;
     }
 
+    let source = unsafe { ffi::CFMachPortCreateRunLoopSource(std::ptr::null(), tap, 0) };
+    if source.is_null() {
+        unsafe {
+            ffi::CFMachPortInvalidate(tap);
+            ffi::CFRelease(tap as *const std::ffi::c_void);
+        }
+        return false;
+    }
+
+    let run_loop = CFRunLoop::get_current();
+    unsafe {
+        ffi::CFRunLoopAddSource(
+            run_loop.as_concrete_TypeRef() as *const _,
+            source,
+            kCFRunLoopDefaultMode as *const _,
+        );
+        ffi::CGEventTapEnable(tap, true);
+    }
+
+    let mut granted = check_input_monitoring_permission();
+    for _ in 0..100 {
+        unsafe {
+            ffi::CFRunLoopRunInMode(kCFRunLoopDefaultMode as *const _, 0.1, true);
+        }
+        granted = check_input_monitoring_permission();
+        if granted {
+            break;
+        }
+    }
+
     unsafe {
         ffi::CGEventTapEnable(tap, false);
+        ffi::CFRunLoopRemoveSource(
+            run_loop.as_concrete_TypeRef() as *const _,
+            source,
+            kCFRunLoopDefaultMode as *const _,
+        );
+        ffi::CFRelease(source as *const std::ffi::c_void);
+        ffi::CFMachPortInvalidate(tap);
         ffi::CFRelease(tap as *const std::ffi::c_void);
     }
 
-    true
+    granted
+}
+
+fn probe_input_monitoring_iohid_manager() -> bool {
+    let manager = unsafe { hid::IOHIDManagerCreate(std::ptr::null(), 0) };
+    if manager.is_null() {
+        return false;
+    }
+
+    unsafe {
+        hid::IOHIDManagerSetDeviceMatching(manager, std::ptr::null());
+    }
+
+    let run_loop = CFRunLoop::get_current();
+    unsafe {
+        hid::IOHIDManagerScheduleWithRunLoop(
+            manager,
+            run_loop.as_concrete_TypeRef() as *const _,
+            kCFRunLoopDefaultMode as *const _,
+        );
+    }
+
+    let open_result = unsafe { hid::IOHIDManagerOpen(manager, 0) };
+    if open_result == hid::K_IO_RETURN_SUCCESS {
+        for _ in 0..30 {
+            unsafe {
+                ffi::CFRunLoopRunInMode(kCFRunLoopDefaultMode as *const _, 0.1, true);
+            }
+            if check_input_monitoring_permission() {
+                break;
+            }
+        }
+    }
+
+    unsafe {
+        hid::IOHIDManagerUnscheduleFromRunLoop(
+            manager,
+            run_loop.as_concrete_TypeRef() as *const _,
+            kCFRunLoopDefaultMode as *const _,
+        );
+    }
+
+    let close_result = unsafe { hid::IOHIDManagerClose(manager, 0) };
+    unsafe {
+        ffi::CFRelease(manager as *const std::ffi::c_void);
+    }
+
+    logging::log(&format!(
+        "[input_monitoring] IOHIDManagerOpen -> {}",
+        open_result
+    ));
+    logging::log(&format!(
+        "[input_monitoring] IOHIDManagerClose -> {}",
+        close_result
+    ));
+
+    open_result == hid::K_IO_RETURN_SUCCESS
+}
+
+type CGPreflightListenEventAccessFn = unsafe extern "C" fn() -> bool;
+type CGRequestListenEventAccessFn = unsafe extern "C" fn() -> bool;
+
+type IOHIDRequestType = i32;
+type IOHIDAccessType = i32;
+
+type IOHIDCheckAccessFn = unsafe extern "C" fn(IOHIDRequestType) -> IOHIDAccessType;
+type IOHIDRequestAccessFn = unsafe extern "C" fn(IOHIDRequestType) -> bool;
+
+fn cg_preflight_listen_event_access() -> Option<bool> {
+    let symbol = resolve_symbol("CGPreflightListenEventAccess")?;
+    let func: CGPreflightListenEventAccessFn = unsafe { std::mem::transmute(symbol) };
+    Some(unsafe { func() })
+}
+
+fn cg_request_listen_event_access() -> Option<bool> {
+    let symbol = resolve_symbol("CGRequestListenEventAccess")?;
+    let func: CGRequestListenEventAccessFn = unsafe { std::mem::transmute(symbol) };
+    Some(unsafe { func() })
+}
+
+fn k_iohid_request_type_listen_event() -> IOHIDRequestType {
+    1
+}
+
+fn k_iohid_access_type_granted() -> IOHIDAccessType {
+    0
+}
+
+fn iohid_check_access(request_type: IOHIDRequestType) -> Option<IOHIDAccessType> {
+    let symbol = resolve_symbol("IOHIDCheckAccess")?;
+    let func: IOHIDCheckAccessFn = unsafe { std::mem::transmute(symbol) };
+    Some(unsafe { func(request_type) })
+}
+
+fn iohid_request_access(request_type: IOHIDRequestType) -> Option<bool> {
+    let symbol = resolve_symbol("IOHIDRequestAccess")?;
+    let func: IOHIDRequestAccessFn = unsafe { std::mem::transmute(symbol) };
+    Some(unsafe { func(request_type) })
+}
+
+fn resolve_symbol(name: &str) -> Option<*mut std::ffi::c_void> {
+    let c_name = CString::new(name).ok()?;
+    let symbol = unsafe { libc::dlsym(libc::RTLD_DEFAULT, c_name.as_ptr() as *const libc::c_char) };
+    if symbol.is_null() {
+        None
+    } else {
+        Some(symbol)
+    }
 }
 
 struct CallbackState {
@@ -304,7 +575,10 @@ fn run_event_tap(tx: Sender<GlobeKeyEvent>, stop_flag: Arc<AtomicBool>) {
     }
 
     // Event mask for flags changed
-    let event_mask: ffi::CGEventMask = 1 << ffi::K_CG_EVENT_FLAGS_CHANGED;
+    let event_mask: ffi::CGEventMask =
+        (1u64 << ffi::K_CG_EVENT_FLAGS_CHANGED)
+        | (1u64 << ffi::K_CG_EVENT_KEY_DOWN)
+        | (1u64 << ffi::K_CG_EVENT_KEY_UP);
 
     // Create event tap
     let tap = unsafe {

@@ -9,8 +9,8 @@ use std::ffi::c_void;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::objc_utils::{
-    nsstring, AutoreleasePool, Id, NSPoint, NSRect, NSSize, NIL, NS_BACKING_STORE_BUFFERED,
-    NS_WINDOW_STYLE_MASK_TITLED,
+    nsstring, AutoreleasePool, CGFloat, Id, NSPoint, NSRect, NSSize, NIL,
+    NS_BACKING_STORE_BUFFERED, NS_WINDOW_STYLE_MASK_BORDERLESS,
 };
 
 fn is_main_thread() -> bool {
@@ -41,6 +41,119 @@ where
     } else {
         Queue::main().exec_async(work)
     }
+}
+
+fn ns_color(red: CGFloat, green: CGFloat, blue: CGFloat, alpha: CGFloat) -> Id {
+    unsafe {
+        msg_send![
+            class!(NSColor),
+            colorWithRed: red
+            green: green
+            blue: blue
+            alpha: alpha
+        ]
+    }
+}
+
+unsafe fn set_view_background(view: Id, color: Id, radius: CGFloat) {
+    let _: () = msg_send![view, setWantsLayer: true as BOOL];
+    let layer: Id = msg_send![view, layer];
+    let cg_color: *mut c_void = msg_send![color, CGColor];
+    let _: () = msg_send![layer, setBackgroundColor: cg_color];
+    let _: () = msg_send![layer, setCornerRadius: radius];
+    let _: () = msg_send![layer, setMasksToBounds: true as BOOL];
+}
+
+unsafe fn create_label(text: &str, frame: NSRect, font: Id, color: Id) -> Id {
+    let label: Id = msg_send![class!(NSTextField), alloc];
+    let label: Id = msg_send![label, initWithFrame: frame];
+    let _: () = msg_send![label, setStringValue: nsstring(text)];
+    let _: () = msg_send![label, setBezeled: false as BOOL];
+    let _: () = msg_send![label, setDrawsBackground: false as BOOL];
+    let _: () = msg_send![label, setEditable: false as BOOL];
+    let _: () = msg_send![label, setSelectable: false as BOOL];
+    let _: () = msg_send![label, setUsesSingleLineMode: false as BOOL];
+    let _: () = msg_send![label, setLineBreakMode: 0i64];
+    let _: () = msg_send![label, setFont: font];
+    let _: () = msg_send![label, setTextColor: color];
+    label
+}
+
+unsafe fn build_permission_row(
+    content_view: Id,
+    origin: NSPoint,
+    size: NSSize,
+    title: &str,
+    description: &str,
+    title_font: Id,
+    desc_font: Id,
+    title_color: Id,
+    desc_color: Id,
+    row_color: Id,
+    button_title: &str,
+    button_font: Id,
+    target: Id,
+    tag: i64,
+) -> (Id, Id) {
+    let row: Id = msg_send![class!(NSView), alloc];
+    let row: Id = msg_send![row, initWithFrame: NSRect::new(origin, size)];
+    set_view_background(row, row_color, 12.0);
+
+    let button_width: CGFloat = 90.0;
+    let button_height: CGFloat = 28.0;
+    let button_x = size.width - button_width - 16.0;
+    let button_y = (size.height - button_height) / 2.0;
+    let label_width = size.width - button_width - 40.0;
+
+    let title_frame = NSRect::new(NSPoint::new(16.0, size.height - 32.0), NSSize::new(label_width, 18.0));
+    let desc_frame = NSRect::new(NSPoint::new(16.0, 12.0), NSSize::new(label_width, 26.0));
+    let title_label = create_label(title, title_frame, title_font, title_color);
+    let desc_label = create_label(description, desc_frame, desc_font, desc_color);
+
+    let button_frame = NSRect::new(
+        NSPoint::new(button_x, button_y),
+        NSSize::new(button_width, button_height),
+    );
+    let button: Id = msg_send![class!(NSButton), alloc];
+    let button: Id = msg_send![button, initWithFrame: button_frame];
+    let _: () = msg_send![button, setBezelStyle: 1i64];
+    let _: () = msg_send![button, setTitle: nsstring(button_title)];
+    let _: () = msg_send![button, setTag: tag];
+    let _: () = msg_send![button, setFont: button_font];
+    let _: () = msg_send![button, setTarget: target];
+    let _: () = msg_send![button, setAction: sel!(togglePressed:)];
+    style_permission_button(button, true);
+
+    let _: () = msg_send![row, addSubview: title_label];
+    let _: () = msg_send![row, addSubview: desc_label];
+    let _: () = msg_send![row, addSubview: button];
+    let _: () = msg_send![content_view, addSubview: row];
+
+    (row, button)
+}
+
+unsafe fn style_permission_button(button: Id, enabled: bool) {
+    let background = if enabled {
+        ns_color(0.34, 0.34, 0.34, 1.0)
+    } else {
+        ns_color(0.26, 0.26, 0.26, 1.0)
+    };
+    let border = if enabled {
+        ns_color(0.45, 0.45, 0.45, 1.0)
+    } else {
+        ns_color(0.30, 0.30, 0.30, 1.0)
+    };
+
+    let _: () = msg_send![button, setBordered: false as BOOL];
+    let _: () = msg_send![button, setBezelStyle: 0i64];
+    let _: () = msg_send![button, setWantsLayer: true as BOOL];
+    let layer: Id = msg_send![button, layer];
+    let bg_color: *mut c_void = msg_send![background, CGColor];
+    let border_color: *mut c_void = msg_send![border, CGColor];
+    let _: () = msg_send![layer, setBackgroundColor: bg_color];
+    let _: () = msg_send![layer, setBorderColor: border_color];
+    let _: () = msg_send![layer, setBorderWidth: 1.0];
+    let _: () = msg_send![layer, setCornerRadius: 10.0];
 }
 
 /// Show an informational dialog with OK button
@@ -148,14 +261,12 @@ pub enum PermissionsAction {
 
 struct DialogState {
     action: Mutex<Option<SetupAction>>,
-    checkbox: Mutex<bool>,
 }
 
 impl DialogState {
     fn new() -> Self {
         Self {
             action: Mutex::new(None),
-            checkbox: Mutex::new(false),
         }
     }
 
@@ -173,14 +284,6 @@ impl DialogState {
         self.action.lock().unwrap().take()
     }
 
-    fn set_checkbox(&self, checked: bool) {
-        let mut checkbox = self.checkbox.lock().unwrap();
-        *checkbox = checked;
-    }
-
-    fn checkbox_checked(&self) -> bool {
-        *self.checkbox.lock().unwrap()
-    }
 }
 
 struct PermissionsState {
@@ -228,17 +331,6 @@ extern "C" fn setup_button_pressed(this: &Object, _: Sel, sender: Id) {
     }
 }
 
-extern "C" fn setup_checkbox_toggled(this: &Object, _: Sel, sender: Id) {
-    unsafe {
-        let state_ptr: *mut c_void = *this.get_ivar("rustState");
-        if !state_ptr.is_null() {
-            let state = &*(state_ptr as *const DialogState);
-            let checked: i64 = msg_send![sender, state];
-            state.set_checkbox(checked != 0);
-        }
-    }
-}
-
 extern "C" fn permissions_button_pressed(this: &Object, _: Sel, sender: Id) {
     unsafe {
         let state_ptr: *mut c_void = *this.get_ivar("rustState");
@@ -283,6 +375,41 @@ struct ClassPtr(*const Class);
 unsafe impl Send for ClassPtr {}
 unsafe impl Sync for ClassPtr {}
 
+struct WindowClassPtr(*const Class);
+
+unsafe impl Send for WindowClassPtr {}
+unsafe impl Sync for WindowClassPtr {}
+
+extern "C" fn borderless_can_become_key(_this: &Object, _: Sel) -> BOOL {
+    true as BOOL
+}
+
+extern "C" fn borderless_can_become_main(_this: &Object, _: Sel) -> BOOL {
+    true as BOOL
+}
+
+fn borderless_window_class() -> &'static Class {
+    static CLASS: OnceLock<WindowClassPtr> = OnceLock::new();
+    let class_ptr = CLASS.get_or_init(|| {
+        let superclass = class!(NSWindow);
+        let mut decl = ClassDecl::new("CCSPBorderlessWindow", superclass)
+            .expect("Failed to create CCSPBorderlessWindow class");
+        unsafe {
+            decl.add_method(
+                sel!(canBecomeKeyWindow),
+                borderless_can_become_key as extern "C" fn(&Object, Sel) -> BOOL,
+            );
+            decl.add_method(
+                sel!(canBecomeMainWindow),
+                borderless_can_become_main as extern "C" fn(&Object, Sel) -> BOOL,
+            );
+        }
+        WindowClassPtr(decl.register() as *const Class)
+    });
+
+    unsafe { &*class_ptr.0 }
+}
+
 fn setup_target_class() -> &'static Class {
     static CLASS: OnceLock<ClassPtr> = OnceLock::new();
     let class_ptr = CLASS.get_or_init(|| {
@@ -294,10 +421,6 @@ fn setup_target_class() -> &'static Class {
             decl.add_method(
                 sel!(buttonPressed:),
                 setup_button_pressed as extern "C" fn(&Object, Sel, Id),
-            );
-            decl.add_method(
-                sel!(checkboxToggled:),
-                setup_checkbox_toggled as extern "C" fn(&Object, Sel, Id),
             );
         }
         ClassPtr(decl.register() as *const Class)
@@ -332,9 +455,9 @@ fn permissions_target_class() -> &'static Class {
 #[derive(Clone, Copy)]
 pub struct SetupWindowHandle {
     window: SendPtr,
+    title_label: SendPtr,
     message: SendPtr,
     progress: SendPtr,
-    checkbox: SendPtr,
     primary_button: SendPtr,
     secondary_button: SendPtr,
 }
@@ -353,10 +476,13 @@ impl SetupWindowHandle {
     pub fn set_title(&self, title: &str) {
         let title = title.to_string();
         let window = self.window;
+        let title_label = self.title_label;
         run_on_main_async(move || unsafe {
             let title_str = nsstring(&title);
             let window = window.into_ptr() as Id;
             let _: () = msg_send![window, setTitle: title_str];
+            let title_label = title_label.into_ptr() as Id;
+            let _: () = msg_send![title_label, setStringValue: title_str];
         });
     }
 
@@ -413,25 +539,6 @@ impl SetupWindowHandle {
         });
     }
 
-    pub fn set_checkbox(&self, label: &str, checked: bool) {
-        let label = label.to_string();
-        let checkbox = self.checkbox;
-        run_on_main_async(move || unsafe {
-            let label_str = nsstring(&label);
-            let checkbox = checkbox.into_ptr() as Id;
-            let _: () = msg_send![checkbox, setTitle: label_str];
-            let _: () = msg_send![checkbox, setState: if checked { 1i64 } else { 0i64 }];
-        });
-    }
-
-    pub fn set_checkbox_visible(&self, visible: bool) {
-        let checkbox = self.checkbox;
-        run_on_main_async(move || unsafe {
-            let checkbox = checkbox.into_ptr() as Id;
-            let _: () = msg_send![checkbox, setHidden: (!visible) as BOOL];
-        });
-    }
-
     pub fn stop_modal(&self) {
         run_on_main_async(|| unsafe {
             let app: Id = msg_send![class!(NSApplication), sharedApplication];
@@ -464,34 +571,41 @@ impl SetupWindow {
             let _: () = msg_send![app, setActivationPolicy: 0i64];
             let _: () = msg_send![app, activateIgnoringOtherApps: true];
 
-            let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(520.0, 220.0));
-            let window: Id = msg_send![class!(NSWindow), alloc];
+            let width: CGFloat = 560.0;
+            let height: CGFloat = 460.0;
+            let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(width, height));
+            let window: Id = msg_send![borderless_window_class(), alloc];
             let window: Id = msg_send![
                 window,
                 initWithContentRect: frame
-                styleMask: NS_WINDOW_STYLE_MASK_TITLED
+                styleMask: NS_WINDOW_STYLE_MASK_BORDERLESS
                 backing: NS_BACKING_STORE_BUFFERED
                 defer: false as BOOL
             ];
 
             let title_str = nsstring(&title);
             let _: () = msg_send![window, setTitle: title_str];
+            let _: () = msg_send![window, setOpaque: false as BOOL];
+            let _: () = msg_send![window, setHasShadow: true as BOOL];
+            let _: () = msg_send![window, setMovableByWindowBackground: true as BOOL];
+
+            let background = ns_color(0.18, 0.18, 0.18, 1.0);
+            let _: () = msg_send![window, setBackgroundColor: background];
+
+            let appearance: Id =
+                msg_send![class!(NSAppearance), appearanceNamed: nsstring("NSAppearanceNameDarkAqua")];
+            let _: () = msg_send![window, setAppearance: appearance];
 
             let content_view: Id = msg_send![window, contentView];
+            set_view_background(content_view, background, 16.0);
 
-            let label_frame = NSRect::new(NSPoint::new(20.0, 110.0), NSSize::new(480.0, 80.0));
-            let label: Id = msg_send![class!(NSTextField), alloc];
-            let label: Id = msg_send![label, initWithFrame: label_frame];
-            let message_str = nsstring(&message);
-            let _: () = msg_send![label, setStringValue: message_str];
-            let _: () = msg_send![label, setBezeled: false as BOOL];
-            let _: () = msg_send![label, setDrawsBackground: false as BOOL];
-            let _: () = msg_send![label, setEditable: false as BOOL];
-            let _: () = msg_send![label, setSelectable: false as BOOL];
-            let _: () = msg_send![label, setUsesSingleLineMode: false as BOOL];
-            let _: () = msg_send![label, setLineBreakMode: 0i64];
+            let title_font: Id = msg_send![class!(NSFont), boldSystemFontOfSize: 22.0 as CGFloat];
+            let body_font: Id = msg_send![class!(NSFont), systemFontOfSize: 13.0 as CGFloat];
+            let title_color = ns_color(0.95, 0.95, 0.95, 1.0);
+            let body_color = ns_color(0.70, 0.70, 0.70, 1.0);
 
-            let progress_frame = NSRect::new(NSPoint::new(20.0, 80.0), NSSize::new(480.0, 20.0));
+            let progress_frame =
+                NSRect::new(NSPoint::new(24.0, height - 18.0), NSSize::new(width - 48.0, 6.0));
             let progress: Id = msg_send![class!(NSProgressIndicator), alloc];
             let progress: Id = msg_send![progress, initWithFrame: progress_frame];
             let _: () = msg_send![progress, setIndeterminate: false as BOOL];
@@ -501,29 +615,36 @@ impl SetupWindow {
             let _: () = msg_send![progress, setStyle: 0i64];
             let _: () = msg_send![progress, setHidden: true as BOOL];
 
-            let checkbox_frame = NSRect::new(NSPoint::new(20.0, 55.0), NSSize::new(480.0, 20.0));
-            let checkbox: Id = msg_send![class!(NSButton), alloc];
-            let checkbox: Id = msg_send![checkbox, initWithFrame: checkbox_frame];
-            let _: () = msg_send![checkbox, setButtonType: 3i64];
-            let _: () = msg_send![checkbox, setTitle: nsstring("")];
-            let _: () = msg_send![checkbox, setState: 0i64];
-            let _: () = msg_send![checkbox, setHidden: true as BOOL];
-            let _: () = msg_send![checkbox, setAllowsMixedState: false as BOOL];
+            let title_frame =
+                NSRect::new(NSPoint::new(24.0, height - 64.0), NSSize::new(width - 48.0, 28.0));
+            let title_label = create_label(&title, title_frame, title_font, title_color);
 
-            let secondary_frame = NSRect::new(NSPoint::new(200.0, 20.0), NSSize::new(140.0, 32.0));
+            let message_frame = NSRect::new(
+                NSPoint::new(24.0, 220.0),
+                NSSize::new(width - 48.0, 150.0),
+            );
+            let label = create_label(&message, message_frame, body_font, body_color);
+
+            let secondary_frame =
+                NSRect::new(NSPoint::new(24.0, 76.0), NSSize::new(width - 48.0, 36.0));
             let secondary: Id = msg_send![class!(NSButton), alloc];
             let secondary: Id = msg_send![secondary, initWithFrame: secondary_frame];
             let _: () = msg_send![secondary, setBezelStyle: 1i64];
             let _: () = msg_send![secondary, setTitle: nsstring("Annuler")];
             let _: () = msg_send![secondary, setTag: 0i64];
+            let secondary_font: Id = msg_send![class!(NSFont), systemFontOfSize: 13.0 as CGFloat];
+            let _: () = msg_send![secondary, setFont: secondary_font];
 
-            let primary_frame = NSRect::new(NSPoint::new(360.0, 20.0), NSSize::new(140.0, 32.0));
+            let primary_frame =
+                NSRect::new(NSPoint::new(24.0, 24.0), NSSize::new(width - 48.0, 44.0));
             let primary: Id = msg_send![class!(NSButton), alloc];
             let primary: Id = msg_send![primary, initWithFrame: primary_frame];
             let _: () = msg_send![primary, setBezelStyle: 1i64];
             let _: () = msg_send![primary, setTitle: nsstring("OK")];
             let _: () = msg_send![primary, setTag: 1i64];
             let _: () = msg_send![primary, setKeyEquivalent: nsstring("\r")];
+            let primary_font: Id = msg_send![class!(NSFont), boldSystemFontOfSize: 14.0 as CGFloat];
+            let _: () = msg_send![primary, setFont: primary_font];
 
             let target: Id = msg_send![setup_target_class(), new];
             let target_obj = target as *mut Object;
@@ -533,12 +654,9 @@ impl SetupWindow {
             let _: () = msg_send![primary, setAction: sel!(buttonPressed:)];
             let _: () = msg_send![secondary, setTarget: target];
             let _: () = msg_send![secondary, setAction: sel!(buttonPressed:)];
-            let _: () = msg_send![checkbox, setTarget: target];
-            let _: () = msg_send![checkbox, setAction: sel!(checkboxToggled:)];
-
+            let _: () = msg_send![content_view, addSubview: title_label];
             let _: () = msg_send![content_view, addSubview: label];
             let _: () = msg_send![content_view, addSubview: progress];
-            let _: () = msg_send![content_view, addSubview: checkbox];
             let _: () = msg_send![content_view, addSubview: primary];
             let _: () = msg_send![content_view, addSubview: secondary];
 
@@ -548,9 +666,9 @@ impl SetupWindow {
             (
                 SetupWindowHandle {
                     window: SendPtr(window as *mut c_void),
+                    title_label: SendPtr(title_label as *mut c_void),
                     message: SendPtr(label as *mut c_void),
                     progress: SendPtr(progress as *mut c_void),
-                    checkbox: SendPtr(checkbox as *mut c_void),
                     primary_button: SendPtr(primary as *mut c_void),
                     secondary_button: SendPtr(secondary as *mut c_void),
                 },
@@ -604,19 +722,6 @@ impl SetupWindow {
         self.handle.set_progress(percent);
     }
 
-    pub fn set_checkbox(&self, label: &str, checked: bool) {
-        self.state.set_checkbox(checked);
-        self.handle.set_checkbox(label, checked);
-    }
-
-    pub fn set_checkbox_visible(&self, visible: bool) {
-        self.handle.set_checkbox_visible(visible);
-    }
-
-    pub fn checkbox_checked(&self) -> bool {
-        self.state.checkbox_checked()
-    }
-
     pub fn run_modal(&self) {
         let window = self.handle.window;
         run_on_main_thread(move || unsafe {
@@ -659,6 +764,10 @@ impl SetupWindow {
 #[derive(Clone, Copy)]
 pub struct PermissionsWindowHandle {
     window: SendPtr,
+    progress: SendPtr,
+    input_row: SendPtr,
+    mic_row: SendPtr,
+    accessibility_row: SendPtr,
     input_toggle: SendPtr,
     mic_toggle: SendPtr,
     accessibility_toggle: SendPtr,
@@ -695,18 +804,31 @@ impl PermissionsWindowHandle {
         });
     }
 
+    pub fn set_progress(&self, percent: f64) {
+        let progress = self.progress;
+        let value = percent.clamp(0.0, 100.0);
+        run_on_main_async(move || unsafe {
+            let progress = progress.into_ptr() as Id;
+            let _: () = msg_send![progress, setDoubleValue: value];
+        });
+    }
+
     pub fn set_toggle(&self, toggle: PermissionToggle, label: &str, checked: bool) {
         let label = label.to_string();
-        let button = match toggle {
-            PermissionToggle::InputMonitoring => self.input_toggle,
-            PermissionToggle::Microphone => self.mic_toggle,
-            PermissionToggle::Accessibility => self.accessibility_toggle,
+        let (button, row) = match toggle {
+            PermissionToggle::InputMonitoring => (self.input_toggle, self.input_row),
+            PermissionToggle::Microphone => (self.mic_toggle, self.mic_row),
+            PermissionToggle::Accessibility => (self.accessibility_toggle, self.accessibility_row),
         };
         run_on_main_async(move || unsafe {
             let label_str = nsstring(&label);
             let button = button.into_ptr() as Id;
             let _: () = msg_send![button, setTitle: label_str];
-            let _: () = msg_send![button, setState: if checked { 1i64 } else { 0i64 }];
+            let enabled = !checked;
+            let _: () = msg_send![button, setEnabled: enabled as BOOL];
+            style_permission_button(button, enabled);
+            let row = row.into_ptr() as Id;
+            let _: () = msg_send![row, setAlphaValue: if checked { 0.6 } else { 1.0 }];
         });
     }
 }
@@ -735,95 +857,154 @@ impl PermissionsWindow {
             let _: () = msg_send![app, setActivationPolicy: 0i64];
             let _: () = msg_send![app, activateIgnoringOtherApps: true];
 
-            let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(520.0, 280.0));
-            let window: Id = msg_send![class!(NSWindow), alloc];
+            let width: CGFloat = 560.0;
+            let height: CGFloat = 560.0;
+            let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(width, height));
+            let window: Id = msg_send![borderless_window_class(), alloc];
             let window: Id = msg_send![
                 window,
                 initWithContentRect: frame
-                styleMask: NS_WINDOW_STYLE_MASK_TITLED
+                styleMask: NS_WINDOW_STYLE_MASK_BORDERLESS
                 backing: NS_BACKING_STORE_BUFFERED
                 defer: false as BOOL
             ];
 
             let title_str = nsstring(&title);
             let _: () = msg_send![window, setTitle: title_str];
+            let _: () = msg_send![window, setOpaque: false as BOOL];
+            let _: () = msg_send![window, setHasShadow: true as BOOL];
+            let _: () = msg_send![window, setMovableByWindowBackground: true as BOOL];
+
+            let background = ns_color(0.18, 0.18, 0.18, 1.0);
+            let _: () = msg_send![window, setBackgroundColor: background];
+
+            let appearance: Id =
+                msg_send![class!(NSAppearance), appearanceNamed: nsstring("NSAppearanceNameDarkAqua")];
+            let _: () = msg_send![window, setAppearance: appearance];
 
             let content_view: Id = msg_send![window, contentView];
+            set_view_background(content_view, background, 16.0);
 
-            let label_frame = NSRect::new(NSPoint::new(20.0, 170.0), NSSize::new(480.0, 80.0));
-            let label: Id = msg_send![class!(NSTextField), alloc];
-            let label: Id = msg_send![label, initWithFrame: label_frame];
-            let message_str = nsstring(&message);
-            let _: () = msg_send![label, setStringValue: message_str];
-            let _: () = msg_send![label, setBezeled: false as BOOL];
-            let _: () = msg_send![label, setDrawsBackground: false as BOOL];
-            let _: () = msg_send![label, setEditable: false as BOOL];
-            let _: () = msg_send![label, setSelectable: false as BOOL];
-            let _: () = msg_send![label, setUsesSingleLineMode: false as BOOL];
-            let _: () = msg_send![label, setLineBreakMode: 0i64];
+            let target: Id = msg_send![permissions_target_class(), new];
+            let target_obj = target as *mut Object;
+            (*target_obj).set_ivar("rustState", state_ptr_send.into_ptr());
 
-            let input_frame = NSRect::new(NSPoint::new(20.0, 130.0), NSSize::new(480.0, 20.0));
-            let input_toggle: Id = msg_send![class!(NSButton), alloc];
-            let input_toggle: Id = msg_send![input_toggle, initWithFrame: input_frame];
-            let _: () = msg_send![input_toggle, setButtonType: 3i64];
-            let _: () = msg_send![input_toggle, setTitle: nsstring("")];
-            let _: () = msg_send![input_toggle, setState: 0i64];
-            let _: () = msg_send![input_toggle, setTag: 1i64];
-            let _: () = msg_send![input_toggle, setAllowsMixedState: false as BOOL];
+            let title_font: Id = msg_send![class!(NSFont), boldSystemFontOfSize: 22.0 as CGFloat];
+            let subtitle_font: Id = msg_send![class!(NSFont), systemFontOfSize: 13.0 as CGFloat];
+            let row_title_font: Id = msg_send![class!(NSFont), boldSystemFontOfSize: 14.0 as CGFloat];
+            let row_desc_font: Id = msg_send![class!(NSFont), systemFontOfSize: 12.0 as CGFloat];
+            let button_font: Id = msg_send![class!(NSFont), systemFontOfSize: 12.0 as CGFloat];
 
-            let mic_frame = NSRect::new(NSPoint::new(20.0, 105.0), NSSize::new(480.0, 20.0));
-            let mic_toggle: Id = msg_send![class!(NSButton), alloc];
-            let mic_toggle: Id = msg_send![mic_toggle, initWithFrame: mic_frame];
-            let _: () = msg_send![mic_toggle, setButtonType: 3i64];
-            let _: () = msg_send![mic_toggle, setTitle: nsstring("")];
-            let _: () = msg_send![mic_toggle, setState: 0i64];
-            let _: () = msg_send![mic_toggle, setTag: 2i64];
-            let _: () = msg_send![mic_toggle, setAllowsMixedState: false as BOOL];
+            let title_color = ns_color(0.95, 0.95, 0.95, 1.0);
+            let subtitle_color = ns_color(0.70, 0.70, 0.70, 1.0);
+            let desc_color = ns_color(0.60, 0.60, 0.60, 1.0);
+            let row_color = ns_color(0.23, 0.23, 0.23, 1.0);
 
-            let accessibility_frame = NSRect::new(NSPoint::new(20.0, 80.0), NSSize::new(480.0, 20.0));
-            let accessibility_toggle: Id = msg_send![class!(NSButton), alloc];
-            let accessibility_toggle: Id =
-                msg_send![accessibility_toggle, initWithFrame: accessibility_frame];
-            let _: () = msg_send![accessibility_toggle, setButtonType: 3i64];
-            let _: () = msg_send![accessibility_toggle, setTitle: nsstring("")];
-            let _: () = msg_send![accessibility_toggle, setState: 0i64];
-            let _: () = msg_send![accessibility_toggle, setTag: 3i64];
-            let _: () = msg_send![accessibility_toggle, setAllowsMixedState: false as BOOL];
+            let progress_frame =
+                NSRect::new(NSPoint::new(24.0, height - 18.0), NSSize::new(width - 48.0, 6.0));
+            let progress: Id = msg_send![class!(NSProgressIndicator), alloc];
+            let progress: Id = msg_send![progress, initWithFrame: progress_frame];
+            let _: () = msg_send![progress, setIndeterminate: false as BOOL];
+            let _: () = msg_send![progress, setMinValue: 0.0];
+            let _: () = msg_send![progress, setMaxValue: 100.0];
+            let _: () = msg_send![progress, setDoubleValue: 0.0];
+            let _: () = msg_send![progress, setStyle: 0i64];
 
-            let secondary_frame = NSRect::new(NSPoint::new(200.0, 20.0), NSSize::new(140.0, 32.0));
+            let title_frame =
+                NSRect::new(NSPoint::new(24.0, height - 64.0), NSSize::new(width - 48.0, 28.0));
+            let title_label = create_label(&title, title_frame, title_font, title_color);
+
+            let subtitle_frame =
+                NSRect::new(NSPoint::new(24.0, height - 110.0), NSSize::new(width - 48.0, 40.0));
+            let subtitle_label = create_label(&message, subtitle_frame, subtitle_font, subtitle_color);
+
+            let row_width = width - 48.0;
+            let row_height: CGFloat = 72.0;
+            let row_spacing: CGFloat = 12.0;
+            let row3_y: CGFloat = 150.0;
+            let row2_y = row3_y + row_height + row_spacing;
+            let row1_y = row2_y + row_height + row_spacing;
+
+            let (input_row, input_toggle) = build_permission_row(
+                content_view,
+                NSPoint::new(24.0, row1_y),
+                NSSize::new(row_width, row_height),
+                "Autoriser Input Monitoring",
+                "Requis pour detecter le raccourci Fn+Shift.",
+                row_title_font,
+                row_desc_font,
+                title_color,
+                desc_color,
+                row_color,
+                "Autoriser",
+                button_font,
+                target,
+                1,
+            );
+
+            let (mic_row, mic_toggle) = build_permission_row(
+                content_view,
+                NSPoint::new(24.0, row2_y),
+                NSSize::new(row_width, row_height),
+                "Autoriser l'acces au micro",
+                "Necessaire pour capter l'audio pendant la dictee.",
+                row_title_font,
+                row_desc_font,
+                title_color,
+                desc_color,
+                row_color,
+                "Autoriser",
+                button_font,
+                target,
+                2,
+            );
+
+            let (accessibility_row, accessibility_toggle) = build_permission_row(
+                content_view,
+                NSPoint::new(24.0, row3_y),
+                NSSize::new(row_width, row_height),
+                "Autoriser l'accessibilite",
+                "Permet de coller le texte dans vos apps.",
+                row_title_font,
+                row_desc_font,
+                title_color,
+                desc_color,
+                row_color,
+                "Autoriser",
+                button_font,
+                target,
+                3,
+            );
+
+            let secondary_frame =
+                NSRect::new(NSPoint::new(24.0, 76.0), NSSize::new(width - 48.0, 36.0));
             let secondary: Id = msg_send![class!(NSButton), alloc];
             let secondary: Id = msg_send![secondary, initWithFrame: secondary_frame];
             let _: () = msg_send![secondary, setBezelStyle: 1i64];
             let _: () = msg_send![secondary, setTitle: nsstring("Plus tard")];
             let _: () = msg_send![secondary, setTag: 0i64];
+            let secondary_font: Id = msg_send![class!(NSFont), systemFontOfSize: 13.0 as CGFloat];
+            let _: () = msg_send![secondary, setFont: secondary_font];
 
-            let primary_frame = NSRect::new(NSPoint::new(360.0, 20.0), NSSize::new(140.0, 32.0));
+            let primary_frame =
+                NSRect::new(NSPoint::new(24.0, 24.0), NSSize::new(width - 48.0, 44.0));
             let primary: Id = msg_send![class!(NSButton), alloc];
             let primary: Id = msg_send![primary, initWithFrame: primary_frame];
             let _: () = msg_send![primary, setBezelStyle: 1i64];
             let _: () = msg_send![primary, setTitle: nsstring("Continuer")];
             let _: () = msg_send![primary, setTag: 1i64];
             let _: () = msg_send![primary, setKeyEquivalent: nsstring("\r")];
-
-            let target: Id = msg_send![permissions_target_class(), new];
-            let target_obj = target as *mut Object;
-            (*target_obj).set_ivar("rustState", state_ptr_send.into_ptr());
+            let primary_font: Id = msg_send![class!(NSFont), boldSystemFontOfSize: 14.0 as CGFloat];
+            let _: () = msg_send![primary, setFont: primary_font];
 
             let _: () = msg_send![primary, setTarget: target];
             let _: () = msg_send![primary, setAction: sel!(buttonPressed:)];
             let _: () = msg_send![secondary, setTarget: target];
             let _: () = msg_send![secondary, setAction: sel!(buttonPressed:)];
-            let _: () = msg_send![input_toggle, setTarget: target];
-            let _: () = msg_send![input_toggle, setAction: sel!(togglePressed:)];
-            let _: () = msg_send![mic_toggle, setTarget: target];
-            let _: () = msg_send![mic_toggle, setAction: sel!(togglePressed:)];
-            let _: () = msg_send![accessibility_toggle, setTarget: target];
-            let _: () = msg_send![accessibility_toggle, setAction: sel!(togglePressed:)];
 
-            let _: () = msg_send![content_view, addSubview: label];
-            let _: () = msg_send![content_view, addSubview: input_toggle];
-            let _: () = msg_send![content_view, addSubview: mic_toggle];
-            let _: () = msg_send![content_view, addSubview: accessibility_toggle];
+            let _: () = msg_send![content_view, addSubview: progress];
+            let _: () = msg_send![content_view, addSubview: title_label];
+            let _: () = msg_send![content_view, addSubview: subtitle_label];
             let _: () = msg_send![content_view, addSubview: primary];
             let _: () = msg_send![content_view, addSubview: secondary];
 
@@ -833,6 +1014,10 @@ impl PermissionsWindow {
             (
                 PermissionsWindowHandle {
                     window: SendPtr(window as *mut c_void),
+                    progress: SendPtr(progress as *mut c_void),
+                    input_row: SendPtr(input_row as *mut c_void),
+                    mic_row: SendPtr(mic_row as *mut c_void),
+                    accessibility_row: SendPtr(accessibility_row as *mut c_void),
                     input_toggle: SendPtr(input_toggle as *mut c_void),
                     mic_toggle: SendPtr(mic_toggle as *mut c_void),
                     accessibility_toggle: SendPtr(accessibility_toggle as *mut c_void),
@@ -865,8 +1050,16 @@ impl PermissionsWindow {
         self.handle.set_secondary_visible(visible);
     }
 
+    pub fn set_progress(&self, percent: f64) {
+        self.handle.set_progress(percent);
+    }
+
     pub fn set_toggle(&self, toggle: PermissionToggle, label: &str, checked: bool) {
         self.handle.set_toggle(toggle, label, checked);
+    }
+
+    pub fn handle(&self) -> PermissionsWindowHandle {
+        self.handle
     }
 
     pub fn run_modal(&self) {

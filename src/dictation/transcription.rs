@@ -160,67 +160,6 @@ impl WhisperTranscriber {
     }
 }
 
-/// Run the dictation setup flow in a single persistent window
-pub fn run_dictation_setup() {
-    std::thread::spawn(|| {
-        let window = native_dialogs::SetupWindow::new(
-            "Setup Dictation",
-            "Checking dictation setup...",
-        );
-        run_dictation_setup_with_window(&window);
-        window.close();
-    });
-}
-
-fn run_dictation_setup_with_window(window: &native_dialogs::SetupWindow) {
-    let status = WhisperTranscriber::new().setup_status();
-
-    match status {
-        DictationSetupStatus::Ready => {
-            window.set_title("Setup Complete");
-            window.set_message(
-                "Dictation is already set up and ready to use!\n\nPress Fn+Shift to start recording.",
-            );
-            window.set_primary_button("OK");
-            window.set_secondary_visible(false);
-            window.wait_for_action();
-        }
-        DictationSetupStatus::MissingModel => {
-            window.set_title("Download Model");
-            window.set_message(
-                "Dictation requires a Whisper model (~500MB download).\n\nThis will download the medium model for speech recognition.\n\nContinue?",
-            );
-            window.set_primary_button("Download");
-            window.set_secondary_button("Cancel");
-            window.set_secondary_visible(true);
-
-            let action = window.wait_for_action();
-            if action == native_dialogs::SetupAction::Secondary {
-                return;
-            }
-
-            match download_model_with_window(window) {
-                Ok(()) => {
-                    window.set_title("Setup Complete");
-                    window.set_message(
-                        "Dictation setup complete!\n\nRestart the app and press Fn+Shift to use dictation.",
-                    );
-                    window.set_primary_button("OK");
-                    window.set_secondary_visible(false);
-                    window.wait_for_action();
-                }
-                Err(e) => {
-                    window.set_title("Download Failed");
-                    window.set_message(&format!("Failed to download model:\n\n{}", e));
-                    window.set_primary_button("OK");
-                    window.set_secondary_visible(false);
-                    window.wait_for_action();
-                }
-            }
-        }
-    }
-}
-
 pub(crate) fn download_model_with_window(
     window: &native_dialogs::SetupWindow,
 ) -> Result<(), String> {

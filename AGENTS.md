@@ -29,6 +29,8 @@ cargo xtask complete-test --skip-notarize --keep-model
 ```
 
 This cleans the system, builds the DMG, and opens it so the new app can be installed and launched.
+When I make any installation-related change, I will run `cargo xtask complete-test --skip-notarize --keep-model` immediately after so you can test without waiting.
+If you want to run xtask without password prompts, see `SUDOERS_SETUP.md`.
 
 This removes:
 - App from /Applications

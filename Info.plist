@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleExecutable</key>
-    <string>claude-sleep-preventer</string>
+    <string>ClaudeSleepPreventer</string>
     <key>CFBundleIdentifier</key>
     <string>com.charlontank.claude-sleep-preventer</string>
     <key>CFBundleName</key>
@@ -26,6 +26,8 @@
     <true/>
     <key>NSMicrophoneUsageDescription</key>
     <string>Pour la dictée vocale speech-to-text (Fn+Shift).</string>
+    <key>NSInputMonitoringUsageDescription</key>
+    <string>Pour détecter le raccourci Fn+Shift.</string>
     <key>NSAccessibilityUsageDescription</key>
     <string>Pour détecter les raccourcis clavier et insérer le texte transcrit.</string>
 </dict>

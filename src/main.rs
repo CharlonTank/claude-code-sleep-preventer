@@ -3,10 +3,11 @@ mod dictation;
 mod logging;
 mod native_dialogs;
 mod objc_utils;
+mod popover;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use dictation::{run_dictation_setup, run_onboarding_if_needed, DictationManager};
+use dictation::{run_onboarding_if_needed, DictationManager};
 use core_foundation::base::{kCFAllocatorDefault, TCFType};
 use core_foundation::boolean::CFBoolean;
 use core_foundation::runloop::{
@@ -21,13 +22,15 @@ use global_hotkey::{
 use io_kit_sys::types::*;
 use io_kit_sys::*;
 use mach2::port::MACH_PORT_NULL;
+use objc::{class, msg_send, sel, sel_impl};
+use serde_json::json;
 use std::fs;
 use std::io::Write;
+use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
 use std::process::Command;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
-use std::sync::Mutex;
 use std::time::Duration;
 use sysinfo::System;
 
@@ -42,20 +45,16 @@ extern "C" {
     fn IOPMAssertionRelease(assertion_id: u32) -> i32;
 }
 
-#[link(name = "CoreGraphics", kind = "framework")]
-extern "C" {
-    fn CGEventSourceFlagsState(stateID: i32) -> u64;
-}
-
-const CG_EVENT_SOURCE_STATE_COMBINED: i32 = 0;
-const CG_EVENT_FLAG_MASK_ALTERNATE: u64 = 0x00080000;
-
 const IOPM_ASSERTION_LEVEL_ON: u32 = 255;
+use tao::event::{Event, StartCause};
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
 use tao::platform::macos::{ActivationPolicy, EventLoopExtMacOS};
 use tray_icon::{
-    menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem},
+    menu::{Menu, MenuEvent, MenuItem},
+    MouseButton,
+    MouseButtonState,
     TrayIconBuilder,
+    TrayIconEvent,
 };
 
 static LID_JUST_CLOSED: AtomicBool = AtomicBool::new(false);
@@ -64,8 +63,6 @@ static CURRENT_PID_INDEX: AtomicUsize = AtomicUsize::new(0);
 static CURRENT_INACTIVE_INDEX: AtomicUsize = AtomicUsize::new(0);
 static CURRENT_ASSERTION_ID: AtomicU32 = AtomicU32::new(0);
 static MANUAL_SLEEP_PREVENTION: AtomicBool = AtomicBool::new(true);
-static LATEST_VERSION: Mutex<Option<String>> = Mutex::new(None);
-static VERSION_CHECK_DONE: AtomicBool = AtomicBool::new(false);
 
 const PIDS_DIR: &str = "/tmp/claude_working_pids";
 const IDLE_TIMEOUT_SECS: u64 = 30;
@@ -88,6 +85,12 @@ enum Commands {
     Stop,
     /// Show current status
     Status,
+    /// List active/inactive instances as JSON
+    List,
+    /// Focus a Claude instance by PID
+    Focus {
+        pid: u32,
+    },
     /// Clean up stale PIDs (interrupted sessions)
     Cleanup,
     /// Run as daemon with cleanup + thermal monitoring
@@ -95,6 +98,8 @@ enum Commands {
         #[arg(short, long, default_value = "1")]
         interval: u64,
     },
+    /// Run background agent (dictation + permissions, no UI)
+    Agent,
     /// Run native menu bar app
     Menubar,
     /// Force reset: clear all PIDs and re-enable sleep
@@ -109,9 +114,15 @@ enum Commands {
     },
     /// Uninstall hooks and restore defaults
     Uninstall {
-        /// Keep Whisper model data (~500 MB)
+        /// Keep Whisper model data (~1.5 GB)
         #[arg(short = 'k', long)]
         keep_model: bool,
+        /// Keep Claude Code hooks
+        #[arg(long)]
+        keep_hooks: bool,
+        /// Keep app data and logs
+        #[arg(long)]
+        keep_data: bool,
     },
     /// Debug: list process names
     Debug,
@@ -124,13 +135,16 @@ fn main() -> Result<()> {
         Commands::Start => cmd_start()?,
         Commands::Stop => cmd_stop()?,
         Commands::Status => cmd_status()?,
+        Commands::List => cmd_list()?,
+        Commands::Focus { pid } => cmd_focus(pid)?,
         Commands::Cleanup => cmd_cleanup()?,
         Commands::Daemon { interval } => cmd_daemon(interval)?,
+        Commands::Agent => cmd_agent()?,
         Commands::Menubar => cmd_menubar()?,
         Commands::Reset => cmd_reset()?,
         Commands::Thermal => cmd_thermal()?,
         Commands::Install { yes } => cmd_install(yes)?,
-        Commands::Uninstall { keep_model } => cmd_uninstall(keep_model)?,
+        Commands::Uninstall { keep_model, keep_hooks, keep_data } => cmd_uninstall(keep_model, keep_hooks, keep_data)?,
         Commands::Debug => cmd_debug()?,
     }
 
@@ -471,6 +485,27 @@ fn cmd_status() -> Result<()> {
     Ok(())
 }
 
+fn cmd_list() -> Result<()> {
+    let active = get_instance_items()
+        .into_iter()
+        .map(|(pid, age, cpu, location)| {
+            json!({
+                "pid": pid,
+                "age_secs": age,
+                "cpu": cpu,
+                "location": location,
+            })
+        })
+        .collect::<Vec<_>>();
+    let inactive = get_inactive_claude_pids();
+    let payload = json!({
+        "active": active,
+        "inactive": inactive,
+    });
+    println!("{}", payload);
+    Ok(())
+}
+
 fn get_file_age(path: &PathBuf) -> Option<u64> {
     fs::metadata(path)
         .ok()?
@@ -729,88 +764,6 @@ fn create_tray_title(count: usize, manual_enabled: bool) -> String {
     }
 }
 
-fn fetch_latest_version() -> Option<String> {
-    // Use GitHub API to get latest release
-    let output = Command::new("curl")
-        .args([
-            "-s",
-            "-H", "Accept: application/vnd.github.v3+json",
-            "https://api.github.com/repos/CharlonTank/claude-code-sleep-preventer/releases/latest"
-        ])
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
-        return None;
-    }
-
-    let json_str = String::from_utf8(output.stdout).ok()?;
-
-    // Simple JSON parsing for tag_name
-    // Looking for "tag_name": "vX.X.X"
-    let tag_marker = "\"tag_name\":";
-    let start = json_str.find(tag_marker)? + tag_marker.len();
-    let rest = &json_str[start..];
-    let quote_start = rest.find('"')? + 1;
-    let rest = &rest[quote_start..];
-    let quote_end = rest.find('"')?;
-    let tag = &rest[..quote_end];
-
-    // Remove 'v' prefix if present
-    let version = tag.strip_prefix('v').unwrap_or(tag);
-    Some(version.to_string())
-}
-
-fn start_version_check() {
-    std::thread::spawn(|| {
-        if let Some(latest) = fetch_latest_version() {
-            if let Ok(mut guard) = LATEST_VERSION.lock() {
-                *guard = Some(latest);
-            }
-        }
-        VERSION_CHECK_DONE.store(true, Ordering::SeqCst);
-    });
-}
-
-fn get_cached_latest_version() -> Option<String> {
-    LATEST_VERSION.lock().ok()?.clone()
-}
-
-fn is_update_available() -> Option<bool> {
-    let latest = get_cached_latest_version()?;
-    let current = env!("CARGO_PKG_VERSION");
-    Some(version_compare(&latest, current) > 0)
-}
-
-fn version_compare(a: &str, b: &str) -> i32 {
-    let parse = |s: &str| -> Vec<u32> {
-        s.split('.')
-            .filter_map(|p| p.parse().ok())
-            .collect()
-    };
-
-    let va = parse(a);
-    let vb = parse(b);
-
-    for i in 0..va.len().max(vb.len()) {
-        let pa = va.get(i).copied().unwrap_or(0);
-        let pb = vb.get(i).copied().unwrap_or(0);
-        if pa > pb {
-            return 1;
-        }
-        if pa < pb {
-            return -1;
-        }
-    }
-    0
-}
-
-fn open_releases_page() {
-    let _ = Command::new("open")
-        .arg("https://github.com/CharlonTank/claude-code-sleep-preventer/releases/latest")
-        .spawn();
-}
-
 fn is_installed() -> bool {
     let home = dirs::home_dir().unwrap_or_default();
     home.join(".claude/hooks/prevent-sleep.sh").exists()
@@ -873,54 +826,6 @@ fn relaunch_app_after_install() {
             logging::log(&format!("[main] Relaunch failed: {}", e));
         }
     }
-}
-
-fn run_uninstall_flow() -> Result<()> {
-    let message = "Are you sure you want to uninstall Claude Sleep Preventer?
-
-This will remove:
-• The app from /Applications
-• Claude Code hooks
-• Launch agent
-• App data and preferences
-• Whisper model (~500 MB) (optional)
-• Sudoers configuration";
-
-    let window = native_dialogs::SetupWindow::new("Uninstall", message);
-    window.set_primary_button("Uninstall");
-    window.set_secondary_button("Cancel");
-    window.set_secondary_visible(true);
-    window.set_checkbox("Also remove Whisper model (~500 MB)", true);
-    window.set_checkbox_visible(true);
-
-    let action = window.wait_for_action();
-    let remove_model = window.checkbox_checked();
-    window.close();
-
-    if action == native_dialogs::SetupAction::Secondary {
-        return Ok(());
-    }
-
-    let mut script =
-        "/Applications/ClaudeSleepPreventer.app/Contents/MacOS/claude-sleep-preventer uninstall"
-            .to_string();
-    if !remove_model {
-        script.push_str(" -k");
-    }
-
-    match authorization::execute_script_with_privileges(&script) {
-        Ok(true) => {
-            native_dialogs::show_dialog("Uninstall complete.", "Uninstall");
-        }
-        Ok(false) => {
-            // User cancelled
-        }
-        Err(e) => {
-            native_dialogs::show_dialog(&format!("Uninstall failed: {}", e), "Uninstall");
-        }
-    }
-
-    Ok(())
 }
 
 fn get_process_tty(pid: u32) -> Option<String> {
@@ -1011,6 +916,13 @@ fn focus_terminal_by_pid(pid: u32) {
     }
 }
 
+fn cmd_focus(pid: u32) -> Result<()> {
+    logging::init();
+    logging::log(&format!("[focus] requested pid={}", pid));
+    focus_terminal_by_pid(pid);
+    Ok(())
+}
+
 fn get_instance_items() -> Vec<(u32, u64, f32, String)> {
     let mut items = Vec::new();
     if let Ok(entries) = fs::read_dir(PIDS_DIR) {
@@ -1027,192 +939,14 @@ fn get_instance_items() -> Vec<(u32, u64, f32, String)> {
     items
 }
 
-fn is_option_key_pressed() -> bool {
+fn quit_app() {
     unsafe {
-        let flags = CGEventSourceFlagsState(CG_EVENT_SOURCE_STATE_COMBINED);
-        (flags & CG_EVENT_FLAG_MASK_ALTERNATE) != 0
-    }
-}
-
-fn kill_inactive_claudes() {
-    let inactive = get_inactive_claude_pids();
-    for pid in inactive {
-        unsafe {
-            libc::kill(pid as i32, libc::SIGTERM);
+        let app: objc_utils::Id = msg_send![class!(NSApplication), sharedApplication];
+        if app.is_null() {
+            return;
         }
+        let _: () = msg_send![app, terminate: objc_utils::NIL];
     }
-}
-
-struct MenuState {
-    toggle_item: CheckMenuItem,
-    instances_header: MenuItem,
-    instance_items: Vec<(MenuItem, u32)>,
-    inactive_header: MenuItem,
-    inactive_items: Vec<(MenuItem, u32)>,
-    kill_inactive_item: MenuItem,
-    dictation_item: CheckMenuItem,
-    setup_dictation_item: Option<MenuItem>,
-    thermal_item: MenuItem,
-    update_item: Option<MenuItem>,
-    uninstall_item: MenuItem,
-    quit_item: MenuItem,
-}
-
-fn build_menu(
-    instances: &[(u32, u64, f32, String)],
-    inactive: &[u32],
-    manual_enabled: bool,
-    thermal: bool,
-    dictation_enabled: bool,
-    dictation_available: bool,
-) -> (Menu, MenuState) {
-    let menu = Menu::new();
-
-    // Version header with status
-    let current_version = env!("CARGO_PKG_VERSION");
-    let version_text = match is_update_available() {
-        Some(true) => {
-            let latest = get_cached_latest_version().unwrap_or_default();
-            format!("CCSP v{} → v{} available", current_version, latest)
-        }
-        Some(false) => format!("CCSP v{} ✓", current_version),
-        None => format!("CCSP v{}", current_version), // Still checking or failed
-    };
-    let version_item = MenuItem::new(&version_text, false, None);
-    menu.append(&version_item).unwrap();
-
-    // Update button (only if update available)
-    let update_item = if is_update_available() == Some(true) {
-        let item = MenuItem::new("⬆️ Download Update", true, None);
-        menu.append(&item).unwrap();
-        Some(item)
-    } else {
-        None
-    };
-
-    menu.append(&PredefinedMenuItem::separator()).unwrap();
-
-    let toggle_text = if manual_enabled {
-        if instances.is_empty() {
-            "🔵─⚪ Sleep Prevention (Idle)"
-        } else {
-            "🔵─⚪ Sleep Prevention (Working)"
-        }
-    } else {
-        "⚪─⚫ Sleep Prevention"
-    };
-    let toggle_item = CheckMenuItem::new(toggle_text, true, false, None);
-    menu.append(&toggle_item).unwrap();
-
-    menu.append(&PredefinedMenuItem::separator()).unwrap();
-
-    let instances_header = MenuItem::new(
-        if instances.is_empty() {
-            "No Active Instances"
-        } else {
-            "Active Instances"
-        },
-        false,
-        None,
-    );
-    menu.append(&instances_header).unwrap();
-
-    let mut instance_items: Vec<(MenuItem, u32)> = Vec::new();
-    for (pid, age, cpu, location) in instances {
-        let item = MenuItem::new(
-            &format!("  {} - {}s - {:.1}%", location, age, cpu),
-            true,
-            None,
-        );
-        menu.append(&item).unwrap();
-        instance_items.push((item, *pid));
-    }
-
-    menu.append(&PredefinedMenuItem::separator()).unwrap();
-
-    let inactive_header = MenuItem::new(
-        if inactive.is_empty() {
-            "No Inactive Instances"
-        } else {
-            "Inactive Instances"
-        },
-        false,
-        None,
-    );
-    menu.append(&inactive_header).unwrap();
-
-    let mut inactive_items: Vec<(MenuItem, u32)> = Vec::new();
-    for pid in inactive {
-        let location = format_process_location(*pid);
-        let item = MenuItem::new(&format!("  {} (⌥ kill)", location), true, None);
-        menu.append(&item).unwrap();
-        inactive_items.push((item, *pid));
-    }
-
-    let kill_inactive_item = MenuItem::new("Kill All Inactive", !inactive.is_empty(), None);
-    menu.append(&kill_inactive_item).unwrap();
-
-    menu.append(&PredefinedMenuItem::separator()).unwrap();
-
-    // Dictation (Fn+Shift)
-    let dictation_text = if dictation_available {
-        if dictation_enabled {
-            "🎤 Dictation (Fn+Shift)"
-        } else {
-            "🎤 Dictation (Off)"
-        }
-    } else {
-        "🎤 Dictation (Not installed)"
-    };
-    let dictation_item = CheckMenuItem::new(dictation_text, dictation_available, dictation_enabled, None);
-    menu.append(&dictation_item).unwrap();
-
-    // Setup button when dictation not available
-    let setup_dictation_item = if !dictation_available {
-        let item = MenuItem::new("   ↳ Setup Dictation...", true, None);
-        menu.append(&item).unwrap();
-        Some(item)
-    } else {
-        None
-    };
-
-    menu.append(&PredefinedMenuItem::separator()).unwrap();
-
-    let thermal_item = MenuItem::new(
-        if thermal {
-            "Thermal: WARNING!"
-        } else {
-            "Thermal: OK"
-        },
-        false,
-        None,
-    );
-    menu.append(&thermal_item).unwrap();
-
-    menu.append(&PredefinedMenuItem::separator()).unwrap();
-
-    let uninstall_item = MenuItem::new("Uninstall...", true, None);
-    let quit_item = MenuItem::new("Quit", true, None);
-    menu.append(&uninstall_item).unwrap();
-    menu.append(&quit_item).unwrap();
-
-    (
-        menu,
-        MenuState {
-            toggle_item,
-            instances_header,
-            instance_items,
-            inactive_header,
-            inactive_items,
-            kill_inactive_item,
-            dictation_item,
-            setup_dictation_item,
-            thermal_item,
-            update_item,
-            uninstall_item,
-            quit_item,
-        },
-    )
 }
 
 fn cmd_menubar() -> Result<()> {
@@ -1227,50 +961,34 @@ fn cmd_menubar() -> Result<()> {
         }
     }
 
-    // Run onboarding for dictation permissions on first launch
-    run_onboarding_if_needed();
-
-    // Start background version check
-    start_version_check();
-
     let mut event_loop = EventLoopBuilder::new().build();
     event_loop.set_activation_policy(ActivationPolicy::Accessory);
     let tick_proxy = event_loop.create_proxy();
 
     let initial_instances = get_instance_items();
-    let initial_inactive = get_inactive_claude_pids();
     let manual_enabled = MANUAL_SLEEP_PREVENTION.load(Ordering::SeqCst);
-    let thermal = check_thermal_warning();
 
     // Initialize dictation manager
     let mut dictation_manager = DictationManager::new();
-    let dictation_available = dictation_manager.is_available();
-    let dictation_enabled = dictation_manager.is_enabled();
 
-    // Start dictation if available
-    logging::log(&format!("[dictation] available={}, enabled={}", dictation_available, dictation_enabled));
-    if dictation_available {
-        if let Err(e) = dictation_manager.start() {
-            logging::log(&format!("[dictation] Failed to start: {}", e));
-        }
-    }
-
-    let (menu, mut state) = build_menu(
-        &initial_instances,
-        &initial_inactive,
-        manual_enabled,
-        thermal,
-        dictation_enabled,
-        dictation_available,
-    );
+    // Create a minimal menu for right-click, but show popover on left-click
+    let minimal_menu = Menu::new();
+    let quit_item = MenuItem::new("Quit", true, None);
+    let quit_item_id = quit_item.id().clone();
+    let _ = minimal_menu.append(&quit_item);
 
     let tray = TrayIconBuilder::new()
-        .with_menu(Box::new(menu))
+        .with_menu(Box::new(minimal_menu))
+        .with_menu_on_left_click(false) // Left-click shows popover, right-click shows menu
         .with_title(&create_tray_title(initial_instances.len(), manual_enabled))
         .with_tooltip("Claude Code Sleep Preventer")
         .build()?;
 
     let menu_channel = MenuEvent::receiver();
+    let tray_event_channel = TrayIconEvent::receiver();
+
+    // Initialize popover window
+    let mut popover = popover::PopoverWindow::new();
 
     // Register global hotkeys
     let hotkey_manager = GlobalHotKeyManager::new().unwrap();
@@ -1321,12 +1039,80 @@ fn cmd_menubar() -> Result<()> {
     });
 
     let mut last_update = std::time::Instant::now() - Duration::from_secs(10);
-    let mut last_instance_count = initial_instances.len();
-    let mut last_inactive_count = initial_inactive.len();
 
-    event_loop.run(move |_event, _, control_flow| {
+    let mut click_check_counter = 0u64;
+    let mut onboarding_checked = false;
+    event_loop.run(move |event, _, control_flow| {
         // Drive updates from the tick thread to avoid relying on user input events.
         *control_flow = ControlFlow::Wait;
+
+        if !onboarding_checked {
+            if let Event::NewEvents(StartCause::Init) = event {
+                onboarding_checked = true;
+                run_onboarding_if_needed(false);
+                let dictation_available = dictation_manager.is_available();
+                let dictation_enabled = dictation_manager.is_enabled();
+                logging::log(&format!(
+                    "[dictation] available={}, enabled={}",
+                    dictation_available, dictation_enabled
+                ));
+                if dictation_available {
+                    if let Err(e) = dictation_manager.start() {
+                        logging::log(&format!("[dictation] Failed to start: {}", e));
+                    }
+                }
+            }
+        }
+
+        click_check_counter += 1;
+        if click_check_counter % 100 == 0 {
+            eprintln!("[DEBUG] Event loop iteration #{}", click_check_counter);
+        }
+        while let Ok(menu_event) = menu_channel.try_recv() {
+            if menu_event.id == quit_item_id {
+                logging::log("[menu] Quit selected");
+                dictation_manager.stop();
+                quit_app();
+                logging::log("[menu] Forcing process exit");
+                unsafe {
+                    libc::_exit(0);
+                }
+            }
+        }
+
+        // Check for tray events every iteration
+        while let Ok(tray_event) = tray_event_channel.try_recv() {
+            eprintln!("[TRAY EVENT] {:?}", tray_event);
+            logging::log(&format!("[tray] EVENT: {:?}", tray_event));
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Down,
+                rect,
+                ..
+            } = tray_event
+            {
+                logging::log(&format!("[tray] Left click at rect: {:?}", rect));
+                if popover.is_visible() {
+                    popover.hide();
+                } else {
+                    let icon_rect = objc_utils::tray_rect_to_appkit((
+                        rect.position.x,
+                        rect.position.y,
+                        rect.size.width as f64,
+                        rect.size.height as f64,
+                    ));
+                    let pstate = popover::PopoverState {
+                        manual_enabled: MANUAL_SLEEP_PREVENTION.load(Ordering::SeqCst),
+                        instances: get_instance_items(),
+                        inactive: get_inactive_claude_pids(),
+                        thermal_warning: check_thermal_warning(),
+                        dictation_enabled: dictation_manager.is_enabled(),
+                        dictation_available: dictation_manager.is_available(),
+                    };
+                    popover.show(icon_rect, &pstate);
+                }
+            }
+        }
 
         // Update dictation manager (handles Fn+Space events)
         dictation_manager.update();
@@ -1335,122 +1121,13 @@ fn cmd_menubar() -> Result<()> {
             last_update = std::time::Instant::now();
 
             let instances = get_instance_items();
-            let inactive = get_inactive_claude_pids();
             let manual_enabled = MANUAL_SLEEP_PREVENTION.load(Ordering::SeqCst);
-            let thermal = check_thermal_warning();
 
             tray.set_title(Some(&create_tray_title(instances.len(), manual_enabled)));
-
-            if instances.len() != last_instance_count || inactive.len() != last_inactive_count {
-                last_instance_count = instances.len();
-                last_inactive_count = inactive.len();
-                let (new_menu, new_state) = build_menu(
-                    &instances,
-                    &inactive,
-                    manual_enabled,
-                    thermal,
-                    dictation_manager.is_enabled(),
-                    dictation_manager.is_available(),
-                );
-                tray.set_menu(Some(Box::new(new_menu)));
-                state = new_state;
-            } else {
-                let toggle_text = if manual_enabled {
-                    if instances.is_empty() {
-                        "🔵─⚪ Sleep Prevention (Idle)"
-                    } else {
-                        "🔵─⚪ Sleep Prevention (Working)"
-                    }
-                } else {
-                    "⚪─⚫ Sleep Prevention"
-                };
-                state.toggle_item.set_text(toggle_text);
-                state.thermal_item.set_text(if thermal {
-                    "Thermal: WARNING!"
-                } else {
-                    "Thermal: OK"
-                });
-                state.instances_header.set_text(if instances.is_empty() {
-                    "No Active Instances"
-                } else {
-                    "Active Instances"
-                });
-                for (i, (item, stored_pid)) in state.instance_items.iter_mut().enumerate() {
-                    if i < instances.len() {
-                        let (pid, age, cpu, location) = &instances[i];
-                        item.set_text(&format!("  {} - {}s - {:.1}%", location, age, cpu));
-                        *stored_pid = *pid;
-                    }
-                }
-                state.inactive_header.set_text(if inactive.is_empty() {
-                    "No Inactive Instances"
-                } else {
-                    "Inactive Instances"
-                });
-            }
         }
 
-        if let Ok(event) = menu_channel.try_recv() {
-            logging::log(&format!("[menu] event id={:?}", event.id));
-            if event.id == state.toggle_item.id() {
-                let new_state = !MANUAL_SLEEP_PREVENTION.load(Ordering::SeqCst);
-                MANUAL_SLEEP_PREVENTION.store(new_state, Ordering::SeqCst);
-                menubar_sync_sleep();
-            } else if event.id == state.kill_inactive_item.id() {
-                kill_inactive_claudes();
-            } else if event.id == state.dictation_item.id() {
-                let new_enabled = !dictation_manager.is_enabled();
-                dictation_manager.set_enabled(new_enabled);
-                if new_enabled && dictation_manager.is_available() {
-                    if let Err(e) = dictation_manager.start() {
-                        eprintln!("[dictation] Failed to start: {}", e);
-                    }
-                }
-                // Update menu item text
-                let text = if dictation_manager.is_available() {
-                    if new_enabled {
-                        "🎤 Dictation (Fn+Shift)"
-                    } else {
-                        "🎤 Dictation (Off)"
-                    }
-                } else {
-                    "🎤 Dictation (Unavailable)"
-                };
-                state.dictation_item.set_text(text);
-                state.dictation_item.set_checked(new_enabled);
-            } else if let Some(ref setup_item) = state.setup_dictation_item {
-                if event.id == setup_item.id() {
-                    run_dictation_setup();
-                }
-            } else if let Some(ref update_item) = state.update_item {
-                if event.id == update_item.id() {
-                    open_releases_page();
-                }
-            } else if event.id == state.uninstall_item.id() {
-                let _ = run_uninstall_flow();
-                *control_flow = ControlFlow::Exit;
-            } else if event.id == state.quit_item.id() {
-                release_sleep_assertion();
-                *control_flow = ControlFlow::Exit;
-            } else {
-                for (item, pid) in &state.instance_items {
-                    if event.id == item.id() && *pid > 0 {
-                        focus_terminal_by_pid(*pid);
-                        break;
-                    }
-                }
-                for (item, pid) in &state.inactive_items {
-                    if event.id == item.id() && *pid > 0 {
-                        if is_option_key_pressed() {
-                            unsafe { libc::kill(*pid as i32, libc::SIGTERM); }
-                        } else {
-                            focus_terminal_by_pid(*pid);
-                        }
-                        break;
-                    }
-                }
-            }
-        }
+        // Menu events commented out - we use popover instead
+        // The menu handling code has been removed since we no longer attach a menu
 
         // Handle global hotkeys
         if let Ok(event) = hotkey_receiver.try_recv() {
@@ -1471,7 +1148,71 @@ fn cmd_menubar() -> Result<()> {
                 }
             }
         }
+
     });
+}
+
+fn cmd_agent() -> Result<()> {
+    logging::init();
+    logging::log("[agent] Starting background agent");
+
+    let _agent_lock = match acquire_agent_lock() {
+        Ok(Some(lock)) => lock,
+        Ok(None) => {
+            logging::log("[agent] Another agent is already running; exiting");
+            return Ok(());
+        }
+        Err(e) => {
+            logging::log(&format!("[agent] Failed to acquire lock: {}", e));
+            return Ok(());
+        }
+    };
+
+    unsafe {
+        let _: objc_utils::Id = msg_send![class!(NSApplication), sharedApplication];
+    }
+
+    run_onboarding_if_needed(true);
+
+    let mut dictation_manager = DictationManager::new();
+    let dictation_available = dictation_manager.is_available();
+    let dictation_enabled = dictation_manager.is_enabled();
+    logging::log(&format!(
+        "[agent] dictation available={}, enabled={}",
+        dictation_available, dictation_enabled
+    ));
+    if dictation_available {
+        if let Err(e) = dictation_manager.start() {
+            logging::log(&format!("[agent] Failed to start dictation: {}", e));
+        }
+    }
+
+    loop {
+        dictation_manager.update();
+        objc_utils::pump_run_loop_once();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn acquire_agent_lock() -> Result<Option<std::fs::File>> {
+    let lock_dir = dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join("ClaudeSleepPreventer");
+    fs::create_dir_all(&lock_dir)?;
+    let lock_path = lock_dir.join("agent.lock");
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&lock_path)?;
+    let fd = file.as_raw_fd();
+    let rc = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
+    if rc != 0 {
+        return Ok(None);
+    }
+    let _ = file.set_len(0);
+    let _ = writeln!(file, "pid={}", std::process::id());
+    Ok(Some(file))
 }
 
 fn ask_yes_no(prompt: &str) -> bool {
@@ -1554,18 +1295,25 @@ fn cmd_install(auto_yes: bool) -> Result<()> {
     "Stop": [{ "hooks": [{ "type": "command", "command": "$HOME/.claude/hooks/allow-sleep.sh" }] }]
 }"#;
 
+    let hooks: serde_json::Value =
+        serde_json::from_str(hooks_json).context("Failed to parse hooks JSON")?;
+
     if settings_file.exists() {
-        let content = fs::read_to_string(&settings_file)?;
-        if let Ok(mut json) = serde_json::from_str::<serde_json::Value>(&content) {
-            let hooks: serde_json::Value = serde_json::from_str(hooks_json)?;
-            json["hooks"] = hooks;
-            fs::write(&settings_file, serde_json::to_string_pretty(&json)?)?;
-        }
+        let content = fs::read_to_string(&settings_file)
+            .with_context(|| format!("Failed to read {}", settings_file.display()))?;
+        let mut json: serde_json::Value = serde_json::from_str(&content)
+            .with_context(|| format!("Failed to parse {}", settings_file.display()))?;
+        json["hooks"] = hooks;
+        fs::write(&settings_file, serde_json::to_string_pretty(&json)?)
+            .with_context(|| format!("Failed to write {}", settings_file.display()))?;
+        println!("  Updated {}", settings_file.display());
     } else {
         fs::create_dir_all(settings_file.parent().unwrap())?;
-        let json = format!(r#"{{"hooks": {}}}"#, hooks_json);
-        let parsed: serde_json::Value = serde_json::from_str(&json)?;
-        fs::write(&settings_file, serde_json::to_string_pretty(&parsed)?)?;
+        let mut json = serde_json::json!({});
+        json["hooks"] = hooks;
+        fs::write(&settings_file, serde_json::to_string_pretty(&json)?)
+            .with_context(|| format!("Failed to write {}", settings_file.display()))?;
+        println!("  Created {}", settings_file.display());
     }
 
     Command::new("sudo")
@@ -1620,27 +1368,30 @@ fn cmd_install(auto_yes: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_uninstall(keep_model: bool) -> Result<()> {
+fn cmd_uninstall(keep_model: bool, keep_hooks: bool, keep_data: bool) -> Result<()> {
     let home = dirs::home_dir().context("Could not find home directory")?;
     let hooks_dir = home.join(".claude").join("hooks");
     let settings_file = home.join(".claude").join("settings.json");
     let launch_agents_dir = home.join("Library/LaunchAgents");
 
-    // Remove hook scripts
-    let _ = fs::remove_file(hooks_dir.join("prevent-sleep.sh"));
-    let _ = fs::remove_file(hooks_dir.join("allow-sleep.sh"));
+    // Remove hook scripts (unless keeping hooks)
+    if !keep_hooks {
+        let _ = fs::remove_file(hooks_dir.join("prevent-sleep.sh"));
+        let _ = fs::remove_file(hooks_dir.join("allow-sleep.sh"));
 
-    // Remove hooks from settings.json
-    if settings_file.exists() {
-        if let Ok(content) = fs::read_to_string(&settings_file) {
-            if let Ok(mut json) = serde_json::from_str::<serde_json::Value>(&content) {
-                if json.get("hooks").is_some() {
-                    json.as_object_mut().unwrap().remove("hooks");
-                    let _ = fs::write(&settings_file, serde_json::to_string_pretty(&json).unwrap());
-                    println!("Removed hooks from settings.json");
+        // Remove hooks from settings.json
+        if settings_file.exists() {
+            if let Ok(content) = fs::read_to_string(&settings_file) {
+                if let Ok(mut json) = serde_json::from_str::<serde_json::Value>(&content) {
+                    if json.get("hooks").is_some() {
+                        json.as_object_mut().unwrap().remove("hooks");
+                        let _ = fs::write(&settings_file, serde_json::to_string_pretty(&json).unwrap());
+                        println!("Removed hooks from settings.json");
+                    }
                 }
             }
         }
+        println!("Removed Claude Code hooks");
     }
 
     // Remove LaunchAgent
@@ -1666,35 +1417,37 @@ fn cmd_uninstall(keep_model: bool) -> Result<()> {
         .args(["pmset", "-a", "disablesleep", "0"])
         .output()?;
 
-    // Remove app data and preferences
-    let app_support = home.join("Library/Application Support/ClaudeSleepPreventer");
-    if app_support.exists() {
-        if keep_model {
-            if let Ok(entries) = fs::read_dir(&app_support) {
-                for entry in entries.flatten() {
-                    let name = entry.file_name();
-                    if name == std::ffi::OsStr::new("models") {
-                        continue;
-                    }
-                    let path = entry.path();
-                    if path.is_dir() {
-                        let _ = fs::remove_dir_all(&path);
-                    } else {
-                        let _ = fs::remove_file(&path);
+    // Remove app data and preferences (unless keeping data)
+    if !keep_data {
+        let app_support = home.join("Library/Application Support/ClaudeSleepPreventer");
+        if app_support.exists() {
+            if keep_model {
+                if let Ok(entries) = fs::read_dir(&app_support) {
+                    for entry in entries.flatten() {
+                        let name = entry.file_name();
+                        if name == std::ffi::OsStr::new("models") {
+                            continue;
+                        }
+                        let path = entry.path();
+                        if path.is_dir() {
+                            let _ = fs::remove_dir_all(&path);
+                        } else {
+                            let _ = fs::remove_file(&path);
+                        }
                     }
                 }
+                println!("Removed app data (kept Whisper model)");
+            } else {
+                let _ = fs::remove_dir_all(&app_support);
+                println!("Removed app data and Whisper model");
             }
-            println!("Removed app data (kept Whisper model)");
-        } else {
-            let _ = fs::remove_dir_all(&app_support);
-            println!("Removed app data");
         }
-    }
 
-    // Remove logs
-    let logs_dir = home.join("Library/Logs/ClaudeSleepPreventer");
-    let _ = fs::remove_dir_all(&logs_dir);
-    println!("Removed logs");
+        // Remove logs
+        let logs_dir = home.join("Library/Logs/ClaudeSleepPreventer");
+        let _ = fs::remove_dir_all(&logs_dir);
+        println!("Removed logs");
+    }
 
     // Remove the app from /Applications
     Command::new("sudo")
@@ -1702,7 +1455,7 @@ fn cmd_uninstall(keep_model: bool) -> Result<()> {
         .output()?;
     println!("Removed app from /Applications");
 
-    println!("✅ Uninstalled successfully");
+    println!("Uninstalled successfully");
 
     Ok(())
 }

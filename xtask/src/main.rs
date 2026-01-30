@@ -209,16 +209,33 @@ fn build_dmg(skip_notarize: bool) -> Result<()> {
     println!("=== Building Claude Sleep Preventer v{} DMG ===\n", version);
 
     // Step 1: Build release
-    println!("[1/9] Building release...");
+    println!("[1/10] Building release...");
     run("cargo", &["build", "--release"])?;
 
-    // Step 2: Build Swift helper (globe-listener)
-    println!("[2/9] Building globe-listener (Swift)...");
+    // Step 2: Build Swift menubar app
+    println!("[2/10] Building menubar app (Swift)...");
+    let menubar_src = Path::new("swift/menubar.swift");
+    if !menubar_src.exists() {
+        bail!("swift/menubar.swift not found");
+    }
+    fs::create_dir_all("target/release")?;
+    run(
+        "swiftc",
+        &[
+            "swift/menubar.swift",
+            "-parse-as-library",
+            "-O",
+            "-o",
+            "target/release/ClaudeSleepPreventer",
+        ],
+    )?;
+
+    // Step 3: Build Swift helper (globe-listener)
+    println!("[3/10] Building globe-listener (Swift)...");
     let globe_listener_src = Path::new("swift/globe-listener.swift");
     if !globe_listener_src.exists() {
         bail!("swift/globe-listener.swift not found");
     }
-    fs::create_dir_all("target/release")?;
     run(
         "swiftc",
         &[
@@ -229,13 +246,13 @@ fn build_dmg(skip_notarize: bool) -> Result<()> {
         ],
     )?;
 
-    // Step 3: Ensure whisper-cli
-    println!("[3/9] Ensuring whisper-cli...");
+    // Step 4: Ensure whisper-cli
+    println!("[4/10] Ensuring whisper-cli...");
     ensure_whisper_cli()?;
     let whisper_cli_path = Path::new("/tmp/whisper.cpp/build/bin/whisper-cli");
 
-    // Step 4: Create app bundle
-    println!("[4/9] Creating app bundle...");
+    // Step 5: Create app bundle
+    println!("[5/10] Creating app bundle...");
     let bundle_dir = Path::new("target/release/bundle");
     let app_dir = bundle_dir.join("ClaudeSleepPreventer.app");
     let contents_dir = app_dir.join("Contents");
@@ -249,7 +266,12 @@ fn build_dmg(skip_notarize: bool) -> Result<()> {
     fs::create_dir_all(&macos_dir)?;
     fs::create_dir_all(&resources_dir)?;
 
-    // Copy main binary
+    // Copy main app binary (Swift)
+    fs::copy(
+        "target/release/ClaudeSleepPreventer",
+        macos_dir.join("ClaudeSleepPreventer"),
+    )?;
+    // Copy Rust CLI binary
     fs::copy(
         "target/release/claude-sleep-preventer",
         macos_dir.join("claude-sleep-preventer"),
@@ -264,8 +286,22 @@ fn build_dmg(skip_notarize: bool) -> Result<()> {
     )?;
     fs::copy(whisper_cli_path, resources_dir.join("whisper-cli"))?;
 
-    // Step 5: Sign Resources binaries first (must be signed before main app)
-    println!("[5/9] Signing Resources binaries...");
+    // Step 6: Sign Resources binaries first (must be signed before main app)
+    println!("[6/10] Signing Resources binaries...");
+    run(
+        "codesign",
+        &[
+            "--force",
+            "--options",
+            "runtime",
+            "--sign",
+            "Developer ID Application",
+            macos_dir
+                .join("claude-sleep-preventer")
+                .to_str()
+                .unwrap(),
+        ],
+    )?;
     run(
         "codesign",
         &[
@@ -289,8 +325,8 @@ fn build_dmg(skip_notarize: bool) -> Result<()> {
         ],
     )?;
 
-    // Step 6: Sign the app with entitlements
-    println!("[6/9] Signing app with entitlements...");
+    // Step 7: Sign the app with entitlements
+    println!("[7/10] Signing app with entitlements...");
     run(
         "codesign",
         &[
@@ -305,8 +341,8 @@ fn build_dmg(skip_notarize: bool) -> Result<()> {
         ],
     )?;
 
-    // Step 7: Create DMG staging folder with Applications symlink
-    println!("[7/9] Creating DMG staging folder...");
+    // Step 8: Create DMG staging folder with Applications symlink
+    println!("[8/10] Creating DMG staging folder...");
     let staging_dir = Path::new("target/release/dmg-staging");
     if staging_dir.exists() {
         fs::remove_dir_all(staging_dir)?;
@@ -320,8 +356,8 @@ fn build_dmg(skip_notarize: bool) -> Result<()> {
     #[cfg(unix)]
     std::os::unix::fs::symlink("/Applications", staging_dir.join("Applications"))?;
 
-    // Step 8: Create DMG
-    println!("[8/9] Creating DMG...");
+    // Step 9: Create DMG
+    println!("[9/10] Creating DMG...");
     if Path::new(&dmg_name).exists() {
         fs::remove_file(&dmg_name)?;
     }
@@ -346,8 +382,8 @@ fn build_dmg(skip_notarize: bool) -> Result<()> {
     if skip_notarize {
         println!("\n[SKIP] Skipping notarization (--skip-notarize flag set)");
     } else {
-        // Step 9: Notarize & Staple
-        println!("[9/9] Notarizing (this may take a few minutes)...");
+        // Step 10: Notarize & Staple
+        println!("[10/10] Notarizing (this may take a few minutes)...");
         run(
             "xcrun",
             &[

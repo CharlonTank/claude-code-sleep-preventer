@@ -6,8 +6,6 @@ mod text_injection;
 mod transcription;
 
 pub use onboarding::run_onboarding_if_needed;
-pub use transcription::run_dictation_setup;
-
 use crate::logging;
 use audio::{
     check_microphone_permission, request_microphone_permission_sync, AudioRecorder,
@@ -68,6 +66,11 @@ impl DictationManager {
             );
         }
 
+        if !globe_key::check_input_monitoring_permission() {
+            logging::log("[dictation] Input Monitoring not granted; skipping globe key listener start");
+            return Ok(());
+        }
+
         // Check/request microphone permission
         let mut mic_permission = check_microphone_permission();
         if mic_permission == MicrophonePermission::NotDetermined {
@@ -91,13 +94,6 @@ impl DictationManager {
         self.globe_key.stop();
         self.overlay.hide();
         self.state = DictationState::Idle;
-    }
-
-    pub fn set_enabled(&mut self, enabled: bool) {
-        self.enabled = enabled;
-        if !enabled {
-            self.stop();
-        }
     }
 
     pub fn is_enabled(&self) -> bool {
