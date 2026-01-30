@@ -321,6 +321,7 @@ dependencies = [
  "libc",
  "mach2 0.6.0",
  "objc",
+ "serde",
  "serde_json",
  "sysinfo",
  "tao",

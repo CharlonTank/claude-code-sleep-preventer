@@ -4,6 +4,7 @@ mod logging;
 mod native_dialogs;
 mod objc_utils;
 mod popover;
+mod settings;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -124,6 +125,8 @@ enum Commands {
         #[arg(long)]
         keep_data: bool,
     },
+    /// Open the settings window
+    Settings,
     /// Debug: list process names
     Debug,
 }
@@ -145,6 +148,7 @@ fn main() -> Result<()> {
         Commands::Thermal => cmd_thermal()?,
         Commands::Install { yes } => cmd_install(yes)?,
         Commands::Uninstall { keep_model, keep_hooks, keep_data } => cmd_uninstall(keep_model, keep_hooks, keep_data)?,
+        Commands::Settings => cmd_settings()?,
         Commands::Debug => cmd_debug()?,
     }
 
@@ -961,6 +965,14 @@ fn cmd_menubar() -> Result<()> {
         }
     }
 
+    // Load settings and initialize sleep prevention state
+    let app_settings = settings::AppSettings::load();
+    MANUAL_SLEEP_PREVENTION.store(app_settings.sleep_prevention.enabled, Ordering::SeqCst);
+    logging::log(&format!(
+        "[main] Loaded settings: sleep_prevention={}",
+        app_settings.sleep_prevention.enabled
+    ));
+
     let mut event_loop = EventLoopBuilder::new().build();
     event_loop.set_activation_policy(ActivationPolicy::Accessory);
     let tick_proxy = event_loop.create_proxy();
@@ -973,6 +985,9 @@ fn cmd_menubar() -> Result<()> {
 
     // Create a minimal menu for right-click, but show popover on left-click
     let minimal_menu = Menu::new();
+    let settings_item = MenuItem::new("Settings...", true, None);
+    let settings_item_id = settings_item.id().clone();
+    let _ = minimal_menu.append(&settings_item);
     let quit_item = MenuItem::new("Quit", true, None);
     let quit_item_id = quit_item.id().clone();
     let _ = minimal_menu.append(&quit_item);
@@ -1069,7 +1084,19 @@ fn cmd_menubar() -> Result<()> {
             eprintln!("[DEBUG] Event loop iteration #{}", click_check_counter);
         }
         while let Ok(menu_event) = menu_channel.try_recv() {
-            if menu_event.id == quit_item_id {
+            if menu_event.id == settings_item_id {
+                logging::log("[menu] Settings selected");
+                popover.hide();
+                if let Some(new_settings) = settings::window::show_settings() {
+                    // Update manual sleep prevention based on settings
+                    MANUAL_SLEEP_PREVENTION.store(new_settings.sleep_prevention.enabled, Ordering::SeqCst);
+                    menubar_sync_sleep();
+                    logging::log(&format!(
+                        "[menu] Settings saved: sleep_enabled={}",
+                        new_settings.sleep_prevention.enabled
+                    ));
+                }
+            } else if menu_event.id == quit_item_id {
                 logging::log("[menu] Quit selected");
                 dictation_manager.stop();
                 quit_app();
@@ -1456,6 +1483,28 @@ fn cmd_uninstall(keep_model: bool, keep_hooks: bool, keep_data: bool) -> Result<
     println!("Removed app from /Applications");
 
     println!("Uninstalled successfully");
+
+    Ok(())
+}
+
+fn cmd_settings() -> Result<()> {
+    logging::init();
+    logging::log("[settings] Opening settings window");
+
+    // Initialize NSApplication for GUI
+    unsafe {
+        let _: objc_utils::Id = msg_send![class!(NSApplication), sharedApplication];
+    }
+
+    if let Some(new_settings) = settings::window::show_settings() {
+        logging::log(&format!(
+            "[settings] Settings saved: sleep_enabled={}, language={}",
+            new_settings.sleep_prevention.enabled,
+            new_settings.speech_to_text.language
+        ));
+    } else {
+        logging::log("[settings] Settings cancelled");
+    }
 
     Ok(())
 }

@@ -8,6 +8,7 @@ use std::sync::mpsc;
 use objc::{class, msg_send, sel, sel_impl};
 
 use crate::native_dialogs;
+use crate::settings::AppSettings;
 
 const MODEL_URL: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin";
 const MODEL_FILENAME: &str = "ggml-medium.bin";
@@ -129,20 +130,28 @@ impl WhisperTranscriber {
             .ok_or("No Whisper model found. Use Setup Dictation to download.")?;
 
         let language = preferred_language().unwrap_or_else(|| "auto".to_string());
+        let vocabulary = get_vocabulary_prompt();
 
         // Audio is already 16kHz mono WAV from AudioRecorder
-        let output = Command::new(&self.whisper_path)
-            .args([
-                "-m",
-                model_path.to_str().unwrap(),
-                "-f",
-                audio_path.to_str().unwrap(),
-                "-t",
-                "8", // 8 threads for Apple Silicon
-                "--no-timestamps",
-            ])
-            .args(["--suppress-nst"])
-            .args(["-l", &language])
+        let mut cmd = Command::new(&self.whisper_path);
+        cmd.args([
+            "-m",
+            model_path.to_str().unwrap(),
+            "-f",
+            audio_path.to_str().unwrap(),
+            "-t",
+            "8", // 8 threads for Apple Silicon
+            "--no-timestamps",
+        ])
+        .args(["--suppress-nst"])
+        .args(["-l", &language]);
+
+        // Add vocabulary as initial prompt if available
+        if !vocabulary.is_empty() {
+            cmd.args(["--prompt", &vocabulary]);
+        }
+
+        let output = cmd
             .output()
             .map_err(|e| format!("whisper-cli failed: {}", e))?;
 
@@ -299,7 +308,27 @@ fn extract_percent(line: &str) -> Option<f64> {
 }
 
 fn preferred_language() -> Option<String> {
+    // Check settings first
+    let settings = AppSettings::load();
+    let lang = &settings.speech_to_text.language;
+    if !lang.is_empty() && lang != "auto" {
+        return Some(lang.clone());
+    }
+
+    // Fallback to environment/system detection
     preferred_language_from_env().or_else(preferred_language_from_system)
+}
+
+/// Get vocabulary words as a prompt string for whisper-cli
+fn get_vocabulary_prompt() -> String {
+    let settings = AppSettings::load();
+    let words = &settings.speech_to_text.vocabulary_words;
+    if words.is_empty() {
+        return String::new();
+    }
+
+    // Join vocabulary words with spaces for the initial prompt
+    words.join(" ")
 }
 
 fn preferred_language_from_env() -> Option<String> {

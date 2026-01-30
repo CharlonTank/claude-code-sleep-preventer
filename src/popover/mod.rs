@@ -198,8 +198,12 @@ impl PopoverWindow {
         let thermal = ui::create_label(thermal_text, 20.0, y, 240.0, 18.0, false);
         let _: () = msg_send![content_view, addSubview: thermal];
 
-        // Quit button at bottom
-        let quit_btn = ui::create_button("Quit", 90.0, 15.0, 100.0, 28.0);
+        // Settings button at bottom left
+        let settings_btn = ui::create_button("Settings", 20.0, 15.0, 80.0, 28.0);
+        let _: () = msg_send![content_view, addSubview: settings_btn];
+
+        // Quit button at bottom right
+        let quit_btn = ui::create_button("Quit", 180.0, 15.0, 80.0, 28.0);
         let _: () = msg_send![content_view, addSubview: quit_btn];
     }
 

@@ -74,6 +74,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSWorkspace.shared.open(logDir)
     }
 
+    @objc private func openSettings() {
+        let cliPath = Bundle.main.bundleURL
+            .appendingPathComponent("Contents/MacOS/claude-sleep-preventer")
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let process = Process()
+            process.executableURL = cliPath
+            process.arguments = ["settings"]
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            do {
+                try process.run()
+                process.waitUntilExit()
+            } catch {
+                NSLog("Failed to open settings: \(error)")
+            }
+            DispatchQueue.main.async {
+                self.refreshMenu()
+            }
+        }
+    }
+
     @objc private func focusInstance(_ sender: NSMenuItem) {
         focusPid(sender.tag)
     }
@@ -235,12 +257,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         menu.addItem(NSMenuItem.separator())
 
+        let settingsItem = NSMenuItem(title: "Settings...", action: #selector(openSettings), keyEquivalent: ",")
+        settingsItem.target = self
         let logsItem = NSMenuItem(title: "Open Logs", action: #selector(openLogs), keyEquivalent: "l")
         logsItem.target = self
         let uninstallItem = NSMenuItem(title: "Uninstall...", action: #selector(uninstallAction), keyEquivalent: "")
         uninstallItem.target = self
         let quitItem = NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q")
         quitItem.target = self
+        menu.addItem(settingsItem)
         menu.addItem(logsItem)
         menu.addItem(uninstallItem)
         menu.addItem(quitItem)
