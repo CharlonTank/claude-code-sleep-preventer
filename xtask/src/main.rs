@@ -467,9 +467,23 @@ fn clean(keep_model: bool) -> Result<()> {
             let _ = fs::remove_file(&launch_agent);
         }
 
-        // Remove Claude Code hooks
+        // Remove Claude Code hooks (may be owned by root from old installations)
         println!("Removing Claude Code hooks...");
-        let _ = fs::remove_dir_all(home.join(".claude/hooks"));
+        let hooks_dir = home.join(".claude/hooks");
+        if hooks_dir.exists() {
+            // Try without sudo first
+            if fs::remove_dir_all(&hooks_dir).is_err() {
+                // If that fails (owned by root), use osascript with admin privileges
+                let cmd = format!("rm -rf '{}'", hooks_dir.display());
+                let applescript = format!(
+                    "do shell script \"{}\" with administrator privileges",
+                    cmd.replace("\"", "\\\"")
+                );
+                let _ = Command::new("osascript")
+                    .args(["-e", &applescript])
+                    .status();
+            }
+        }
 
         // Clean hooks from settings.json
         let settings_path = home.join(".claude/settings.json");

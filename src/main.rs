@@ -15,7 +15,6 @@ use core_foundation::runloop::{
     kCFRunLoopDefaultMode, CFRunLoopAddSource, CFRunLoopGetCurrent, CFRunLoopRun,
 };
 use core_foundation::string::CFString;
-use core_foundation::string::CFStringRef;
 use global_hotkey::{
     hotkey::{Code, HotKey, Modifiers},
     GlobalHotKeyEvent, GlobalHotKeyManager,
@@ -31,22 +30,12 @@ use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
 use std::process::Command;
 use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 use sysinfo::System;
 
 #[link(name = "IOKit", kind = "framework")]
-extern "C" {
-    fn IOPMAssertionCreateWithName(
-        assertion_type: CFStringRef,
-        assertion_level: u32,
-        assertion_name: CFStringRef,
-        assertion_id: *mut u32,
-    ) -> i32;
-    fn IOPMAssertionRelease(assertion_id: u32) -> i32;
-}
-
-const IOPM_ASSERTION_LEVEL_ON: u32 = 255;
+extern "C" {}
 use tao::event::{Event, StartCause};
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
 use tao::platform::macos::{ActivationPolicy, EventLoopExtMacOS};
@@ -62,7 +51,6 @@ static LID_JUST_CLOSED: AtomicBool = AtomicBool::new(false);
 static LID_WAS_CLOSED: AtomicBool = AtomicBool::new(false);
 static CURRENT_PID_INDEX: AtomicUsize = AtomicUsize::new(0);
 static CURRENT_INACTIVE_INDEX: AtomicUsize = AtomicUsize::new(0);
-static CURRENT_ASSERTION_ID: AtomicU32 = AtomicU32::new(0);
 static MANUAL_SLEEP_PREVENTION: AtomicBool = AtomicBool::new(true);
 
 const PIDS_DIR: &str = "/tmp/claude_working_pids";
@@ -212,63 +200,34 @@ fn count_active_pids() -> usize {
 
 fn set_sleep_disabled(disabled: bool) -> Result<()> {
     let value = if disabled { "1" } else { "0" };
-    Command::new("sudo")
+    let output = Command::new("sudo")
         .args(["pmset", "-a", "disablesleep", value])
         .output()
         .context("Failed to run pmset")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        logging::log(&format!(
+            "[pmset] Failed to set disablesleep={}: {}",
+            value,
+            stderr.trim()
+        ));
+    }
     Ok(())
 }
 
-fn create_sleep_assertion() -> bool {
-    let current = CURRENT_ASSERTION_ID.load(Ordering::SeqCst);
-    if current != 0 {
-        return true;
-    }
-
-    unsafe {
-        let assertion_type = CFString::new("PreventUserIdleSystemSleep");
-        let assertion_name = CFString::new("Claude Code Sleep Preventer");
-        let mut assertion_id: u32 = 0;
-
-        let result = IOPMAssertionCreateWithName(
-            assertion_type.as_concrete_TypeRef(),
-            IOPM_ASSERTION_LEVEL_ON,
-            assertion_name.as_concrete_TypeRef(),
-            &mut assertion_id,
-        );
-
-        if result == 0 {
-            CURRENT_ASSERTION_ID.store(assertion_id, Ordering::SeqCst);
-            true
-        } else {
-            false
-        }
-    }
-}
-
-fn release_sleep_assertion() {
-    let assertion_id = CURRENT_ASSERTION_ID.swap(0, Ordering::SeqCst);
-    if assertion_id != 0 {
-        unsafe {
-            IOPMAssertionRelease(assertion_id);
-        }
-    }
-}
-
-fn has_active_assertion() -> bool {
-    CURRENT_ASSERTION_ID.load(Ordering::SeqCst) != 0
-}
 
 fn menubar_sync_sleep() {
     let manual_enabled = MANUAL_SLEEP_PREVENTION.load(Ordering::SeqCst);
     let active = count_active_pids();
-    let has_assertion = has_active_assertion();
+    let sleep_disabled = is_sleep_disabled();
     let should_prevent = manual_enabled && active > 0;
 
-    if should_prevent && !has_assertion {
-        create_sleep_assertion();
-    } else if !should_prevent && has_assertion {
-        release_sleep_assertion();
+    if should_prevent && !sleep_disabled {
+        let _ = set_sleep_disabled(true);
+        logging::log(&format!("[sync] Sleep disabled (active PIDs: {})", active));
+    } else if !should_prevent && sleep_disabled {
+        let _ = set_sleep_disabled(false);
+        logging::log("[sync] Sleep re-enabled");
         if is_lid_closed() {
             force_sleep_now();
         }
@@ -276,36 +235,50 @@ fn menubar_sync_sleep() {
 }
 
 fn cleanup_stale_pids() {
-    if let Ok(entries) = fs::read_dir(PIDS_DIR) {
-        for entry in entries.filter_map(|e| e.ok()) {
-            let pid: u32 = match entry.file_name().to_string_lossy().parse() {
-                Ok(p) => p,
-                Err(_) => continue,
-            };
+    let entries = match fs::read_dir(PIDS_DIR) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
 
-            let path = entry.path();
+    let mut removed = 0;
+    let mut total = 0;
 
-            if !is_process_alive(pid) {
-                let _ = fs::remove_file(&path);
-                continue;
+    for entry in entries.filter_map(|e| e.ok()) {
+        let pid: u32 = match entry.file_name().to_string_lossy().parse() {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+
+        total += 1;
+        let path = entry.path();
+
+        if !is_process_alive(pid) {
+            if fs::remove_file(&path).is_ok() {
+                removed += 1;
             }
+            continue;
+        }
 
-            let age = get_file_age(&path).unwrap_or(0);
-            if age >= IDLE_TIMEOUT_SECS {
-                let cpu = get_process_cpu(pid);
-                if cpu < IDLE_CPU_THRESHOLD {
-                    let _ = fs::remove_file(&path);
+        let age = get_file_age(&path).unwrap_or(0);
+        if age >= IDLE_TIMEOUT_SECS {
+            let cpu = get_process_cpu(pid);
+            if cpu < IDLE_CPU_THRESHOLD {
+                if fs::remove_file(&path).is_ok() {
+                    removed += 1;
                 }
             }
         }
     }
+
+    if removed > 0 {
+        logging::log(&format!(
+            "[cleanup] Removed {}/{} stale PIDs",
+            removed, total
+        ));
+    }
 }
 
 fn is_sleep_disabled() -> bool {
-    if has_active_assertion() {
-        return true;
-    }
-
     unsafe {
         let service_name = b"IOPMrootDomain\0";
         let matching = IOServiceMatching(service_name.as_ptr() as *const i8);
@@ -502,9 +475,11 @@ fn cmd_list() -> Result<()> {
         })
         .collect::<Vec<_>>();
     let inactive = get_inactive_claude_pids();
+    let sleep_disabled = is_sleep_disabled();
     let payload = json!({
         "active": active,
         "inactive": inactive,
+        "sleep_disabled": sleep_disabled,
     });
     println!("{}", payload);
     Ok(())
@@ -1045,7 +1020,8 @@ fn cmd_menubar() -> Result<()> {
 
             if tick_counter % 300 == 0 {
                 if check_thermal_warning() {
-                    release_sleep_assertion();
+                    let _ = set_sleep_disabled(false);
+                    logging::log("[thermal] Sleep re-enabled due to thermal warning");
                 }
             }
 
@@ -1135,6 +1111,7 @@ fn cmd_menubar() -> Result<()> {
                         thermal_warning: check_thermal_warning(),
                         dictation_enabled: dictation_manager.is_enabled(),
                         dictation_available: dictation_manager.is_available(),
+                        sleep_disabled: is_sleep_disabled(),
                     };
                     popover.show(icon_rect, &pstate);
                 }
@@ -1201,6 +1178,16 @@ fn cmd_agent() -> Result<()> {
 
     run_onboarding_if_needed(true);
 
+    // Load settings and initialize sleep prevention state
+    let app_settings = settings::AppSettings::load();
+    MANUAL_SLEEP_PREVENTION.store(app_settings.sleep_prevention.enabled, Ordering::SeqCst);
+    logging::log(&format!(
+        "[agent] Loaded settings: sleep_prevention={}",
+        app_settings.sleep_prevention.enabled
+    ));
+
+    start_clamshell_notifications();
+
     let mut dictation_manager = DictationManager::new();
     let dictation_available = dictation_manager.is_available();
     let dictation_enabled = dictation_manager.is_enabled();
@@ -1214,10 +1201,40 @@ fn cmd_agent() -> Result<()> {
         }
     }
 
+    let mut tick_counter = 0u64;
+
     loop {
         dictation_manager.update();
         objc_utils::pump_run_loop_once();
         std::thread::sleep(Duration::from_millis(50));
+        tick_counter += 1;
+
+        // Every 1s: cleanup stale PIDs and sync sleep state
+        if tick_counter % 20 == 0 {
+            cleanup_stale_pids();
+            menubar_sync_sleep();
+        }
+
+        // Every 3s: thermal check + lid close
+        if tick_counter % 60 == 0 {
+            if check_thermal_warning() {
+                let _ = set_sleep_disabled(false);
+                logging::log("[agent][thermal] Sleep re-enabled due to thermal warning");
+            }
+
+            if LID_JUST_CLOSED.swap(false, Ordering::SeqCst) {
+                let active = count_active_pids();
+                if active > 0 {
+                    play_lid_close_sound();
+                }
+            }
+        }
+
+        // Every 30s: reload settings from disk
+        if tick_counter % 600 == 0 {
+            let new_settings = settings::AppSettings::load();
+            MANUAL_SLEEP_PREVENTION.store(new_settings.sleep_prevention.enabled, Ordering::SeqCst);
+        }
     }
 }
 
@@ -1290,28 +1307,55 @@ fn cmd_install(auto_yes: bool) -> Result<()> {
             hooks_dir.join("allow-sleep.sh"),
             fs::Permissions::from_mode(0o755),
         )?;
+
+        // Fix ownership if running as root (via sudo)
+        if let Ok(sudo_user) = std::env::var("SUDO_USER") {
+            let _ = Command::new("chown")
+                .args(["-R", &sudo_user, hooks_dir.to_str().unwrap()])
+                .status();
+        }
     }
 
     println!("Setting up passwordless sudo for pmset...");
+    // Get the real user (not root) for sudoers entry
+    let real_user = std::env::var("SUDO_USER")
+        .or_else(|_| std::env::var("USER"))
+        .unwrap_or_default();
     let sudoers_content = format!(
         "{} ALL=(ALL) NOPASSWD: /usr/bin/pmset\n",
-        std::env::var("USER").unwrap_or_default()
+        real_user
     );
 
-    let mut child = Command::new("sudo")
-        .args(["tee", "/etc/sudoers.d/claude-pmset"])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .spawn()?;
+    // Write directly if we're root, otherwise use sudo
+    let is_root = unsafe { libc::geteuid() == 0 };
+    let mut child = if is_root {
+        Command::new("tee")
+            .arg("/etc/sudoers.d/claude-pmset")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .spawn()?
+    } else {
+        Command::new("sudo")
+            .args(["tee", "/etc/sudoers.d/claude-pmset"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .spawn()?
+    };
 
     if let Some(stdin) = child.stdin.as_mut() {
         stdin.write_all(sudoers_content.as_bytes())?;
     }
     child.wait()?;
 
-    Command::new("sudo")
-        .args(["chmod", "440", "/etc/sudoers.d/claude-pmset"])
-        .output()?;
+    if is_root {
+        Command::new("chmod")
+            .args(["440", "/etc/sudoers.d/claude-pmset"])
+            .output()?;
+    } else {
+        Command::new("sudo")
+            .args(["chmod", "440", "/etc/sudoers.d/claude-pmset"])
+            .output()?;
+    }
 
     println!("Configuring Claude Code hooks...");
 
@@ -1343,12 +1387,29 @@ fn cmd_install(auto_yes: bool) -> Result<()> {
         println!("  Created {}", settings_file.display());
     }
 
-    Command::new("sudo")
-        .args(["pmset", "-a", "sleep", "5"])
-        .output()?;
-    Command::new("sudo")
-        .args(["pmset", "-a", "disablesleep", "0"])
-        .output()?;
+    // Fix ownership of settings.json if running as root (via sudo)
+    #[cfg(unix)]
+    if let Ok(sudo_user) = std::env::var("SUDO_USER") {
+        let _ = Command::new("chown")
+            .args([&sudo_user, settings_file.to_str().unwrap()])
+            .status();
+    }
+
+    if is_root {
+        Command::new("pmset")
+            .args(["-a", "sleep", "5"])
+            .output()?;
+        Command::new("pmset")
+            .args(["-a", "disablesleep", "0"])
+            .output()?;
+    } else {
+        Command::new("sudo")
+            .args(["pmset", "-a", "sleep", "5"])
+            .output()?;
+        Command::new("sudo")
+            .args(["pmset", "-a", "disablesleep", "0"])
+            .output()?;
+    }
 
     println!();
     if auto_yes || ask_yes_no("Launch menu bar app at login?") {

@@ -12,8 +12,9 @@ struct InstanceList {
     let active: [ActiveInstance]
     let inactive: [Int]
     let hooksInstalled: Bool
+    let sleepDisabled: Bool
 
-    static let empty = InstanceList(active: [], inactive: [], hooksInstalled: false)
+    static let empty = InstanceList(active: [], inactive: [], hooksInstalled: false, sleepDisabled: false)
 
     var inactiveCount: Int {
         inactive.count
@@ -129,7 +130,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func installHooksAction() {
-        installHooks()
+        showInstallDialog()
     }
 
     @objc private func uninstallAction() {
@@ -171,14 +172,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let hooksInstalled = isHooksInstalled()
 
         guard process.terminationStatus == 0 else {
-            return InstanceList(active: [], inactive: [], hooksInstalled: hooksInstalled)
+            return InstanceList(active: [], inactive: [], hooksInstalled: hooksInstalled, sleepDisabled: false)
         }
 
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         guard
             let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else {
-            return InstanceList(active: [], inactive: [], hooksInstalled: hooksInstalled)
+            return InstanceList(active: [], inactive: [], hooksInstalled: hooksInstalled, sleepDisabled: false)
         }
 
         let activeArray = json["active"] as? [[String: Any]] ?? []
@@ -197,8 +198,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let inactiveArray = json["inactive"] as? [Any] ?? []
         let inactive = inactiveArray.compactMap { ($0 as? NSNumber)?.intValue }
+        let sleepDisabled = (json["sleep_disabled"] as? NSNumber)?.boolValue ?? false
 
-        return InstanceList(active: active, inactive: inactive, hooksInstalled: hooksInstalled)
+        return InstanceList(active: active, inactive: inactive, hooksInstalled: hooksInstalled, sleepDisabled: sleepDisabled)
     }
 
     private func updateMenu(with list: InstanceList) {
@@ -244,6 +246,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 menu.addItem(moreItem)
             }
         }
+
+        menu.addItem(NSMenuItem.separator())
+
+        let sleepStatus = list.sleepDisabled ? "disablesleep = 1 (sleep blocked)" : "disablesleep = 0 (sleep allowed)"
+        menu.addItem(disabledItem(sleepStatus))
 
         menu.addItem(NSMenuItem.separator())
 
@@ -433,23 +440,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if isHooksInstalled() {
             return
         }
+        showInstallDialog(canCancel: false)
+    }
 
+    private func showInstallDialog(canCancel: Bool = true) {
         let alert = NSAlert()
-        alert.messageText = "Install Claude Code hooks?"
-        alert.informativeText = "This sets up Claude Code hooks and sleep control. Administrator password required."
-        alert.addButton(withTitle: "Install")
-        alert.addButton(withTitle: "Later")
+        alert.messageText = "Install Claude Code Hooks"
+        alert.informativeText = """
+            This will configure Claude Code hooks to automatically prevent sleep while Claude is working.
+
+            The hooks will:
+            • Prevent system sleep when Claude starts a task
+            • Re-enable sleep when Claude finishes
+
+            Administrator password required.
+            """
+        alert.addButton(withTitle: "Install Hooks")
+        if canCancel {
+            alert.addButton(withTitle: "Cancel")
+        }
+
+        let contentView = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: 30))
+        let debugCheck = NSButton(checkboxWithTitle: "Enable debug logging", target: nil, action: nil)
+        debugCheck.state = .off
+        debugCheck.frame = NSRect(x: 0, y: 5, width: 300, height: 20)
+        contentView.addSubview(debugCheck)
+        alert.accessoryView = contentView
+
         let response = alert.runModal()
         if response == .alertFirstButtonReturn {
-            installHooks()
+            installHooks(debug: debugCheck.state == .on)
         }
     }
 
-    private func installHooks() {
+    private func installHooks(debug: Bool = false) {
         if isInstalling {
             return
         }
         isInstalling = true
+
+        // TODO: Use debug flag when implemented in CLI
+        _ = debug
 
         let cliPath = Bundle.main.bundleURL
             .appendingPathComponent("Contents/MacOS/claude-sleep-preventer")

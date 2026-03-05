@@ -23,6 +23,7 @@ pub struct PopoverState {
     pub thermal_warning: bool,
     pub dictation_enabled: bool,
     pub dictation_available: bool,
+    pub sleep_disabled: bool,
 }
 
 pub struct PopoverWindow {
@@ -187,6 +188,16 @@ impl PopoverWindow {
         };
         let dictation = ui::create_label(dictation_text, 20.0, y, 240.0, 18.0, false);
         let _: () = msg_send![content_view, addSubview: dictation];
+        y -= 22.0;
+
+        // Sleep status
+        let sleep_text = if state.sleep_disabled {
+            "disablesleep = 1 (sleep blocked)"
+        } else {
+            "disablesleep = 0 (sleep allowed)"
+        };
+        let sleep_label = ui::create_label(sleep_text, 20.0, y, 240.0, 18.0, false);
+        let _: () = msg_send![content_view, addSubview: sleep_label];
         y -= 22.0;
 
         // Thermal status
