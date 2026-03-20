@@ -26,8 +26,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var agentProcess: Process?
     private let menu = NSMenu()
     private var isRefreshing = false
+    private var isRefreshingStatus = false
     private var isInstalling = false
     private var isUninstalling = false
+    private var statusRefreshTimer: Timer?
     private var hotKeyHandler: EventHandlerRef?
     private var hotKeyActive: EventHotKeyRef?
     private var hotKeyInactive: EventHotKeyRef?
@@ -35,6 +37,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let hotKeyQueue = DispatchQueue(label: "ccsp.hotkeys")
     private var activeIndex = 0
     private var inactiveIndex = 0
+    private let statusRefreshInterval: TimeInterval = 2.0
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let app = NSApplication.shared
@@ -53,10 +56,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         startAgent()
         registerHotKeys()
         refreshMenu()
+        startStatusRefreshTimer()
         promptInstallHooksIfNeeded()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        statusRefreshTimer?.invalidate()
         unregisterHotKeys()
         stopAgent()
     }
@@ -147,6 +152,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             DispatchQueue.main.async {
                 self.updateMenu(with: list)
                 self.isRefreshing = false
+            }
+        }
+    }
+
+    private func startStatusRefreshTimer() {
+        statusRefreshTimer?.invalidate()
+        let timer = Timer(
+            timeInterval: statusRefreshInterval,
+            repeats: true
+        ) { [weak self] _ in
+            self?.refreshStatusTitle()
+        }
+        statusRefreshTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func refreshStatusTitle() {
+        if isRefreshingStatus {
+            return
+        }
+        isRefreshingStatus = true
+        DispatchQueue.global(qos: .utility).async {
+            let list = self.fetchInstanceList()
+            DispatchQueue.main.async {
+                self.updateStatusTitle(with: list)
+                self.isRefreshingStatus = false
             }
         }
     }
