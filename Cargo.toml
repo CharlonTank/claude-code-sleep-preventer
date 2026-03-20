@@ -3,7 +3,7 @@ members = [".", "xtask"]
 
 [package]
 name = "claude-sleep-preventer"
-version = "3.0.1"
+version = "3.0.2"
 edition = "2021"
 description = "Keep your Mac awake while Claude Code is working"
 license = "MIT"

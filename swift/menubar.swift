@@ -21,15 +21,33 @@ struct InstanceList {
     }
 }
 
+struct UpdateRelease {
+    let version: String
+    let releaseURL: URL
+    let downloadURL: URL
+}
+
+private enum UpdateCheckMode {
+    case automatic
+    case manual
+}
+
+private struct UpdateCheckError: Error {
+    let message: String
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem?
     private var agentProcess: Process?
     private let menu = NSMenu()
     private var isRefreshing = false
     private var isRefreshingStatus = false
+    private var isCheckingForUpdates = false
     private var isInstalling = false
     private var isUninstalling = false
+    private var availableUpdate: UpdateRelease?
     private var statusRefreshTimer: Timer?
+    private var updateCheckTimer: Timer?
     private var hotKeyHandler: EventHandlerRef?
     private var hotKeyActive: EventHotKeyRef?
     private var hotKeyInactive: EventHotKeyRef?
@@ -38,6 +56,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var activeIndex = 0
     private var inactiveIndex = 0
     private let statusRefreshInterval: TimeInterval = 2.0
+    private let automaticUpdateCheckInterval: TimeInterval = 12 * 60 * 60
+    private let automaticUpdateStartupDelay: TimeInterval = 10.0
+    private let releasesAPIURL = URL(string: "https://api.github.com/repos/CharlonTank/claude-code-sleep-preventer/releases/latest")!
+    private let fallbackReleaseURL = URL(string: "https://github.com/CharlonTank/claude-code-sleep-preventer/releases/latest")!
+    private let lastUpdateCheckDefaultsKey = "ccsp.lastUpdateCheckDate"
+    private let skippedUpdateVersionDefaultsKey = "ccsp.skippedUpdateVersion"
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let app = NSApplication.shared
@@ -58,10 +82,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         refreshMenu()
         startStatusRefreshTimer()
         promptInstallHooksIfNeeded()
+        startUpdateChecks()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         statusRefreshTimer?.invalidate()
+        updateCheckTimer?.invalidate()
         unregisterHotKeys()
         stopAgent()
     }
@@ -142,6 +168,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         showUninstallDialog()
     }
 
+    @objc private func checkForUpdatesAction() {
+        checkForUpdates(mode: .manual)
+    }
+
+    @objc private func downloadAvailableUpdateAction() {
+        guard let availableUpdate else {
+            checkForUpdates(mode: .manual)
+            return
+        }
+        openUpdate(availableUpdate)
+    }
+
     private func refreshMenu() {
         if isRefreshing {
             return
@@ -168,6 +206,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         RunLoop.main.add(timer, forMode: .common)
     }
 
+    private func startUpdateChecks() {
+        updateCheckTimer?.invalidate()
+        let timer = Timer(
+            timeInterval: automaticUpdateCheckInterval,
+            repeats: true
+        ) { [weak self] _ in
+            self?.checkForUpdates(mode: .automatic)
+        }
+        updateCheckTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + automaticUpdateStartupDelay) { [weak self] in
+            self?.checkForUpdatesIfDue()
+        }
+    }
+
     private func refreshStatusTitle() {
         if isRefreshingStatus {
             return
@@ -179,6 +233,202 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self.updateStatusTitle(with: list)
                 self.isRefreshingStatus = false
             }
+        }
+    }
+
+    private func checkForUpdatesIfDue() {
+        let defaults = UserDefaults.standard
+        if let lastCheckDate = defaults.object(forKey: lastUpdateCheckDefaultsKey) as? Date,
+           Date().timeIntervalSince(lastCheckDate) < automaticUpdateCheckInterval {
+            return
+        }
+        checkForUpdates(mode: .automatic)
+    }
+
+    private func checkForUpdates(mode: UpdateCheckMode) {
+        if isCheckingForUpdates {
+            return
+        }
+
+        isCheckingForUpdates = true
+
+        var request = URLRequest(url: releasesAPIURL)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 15
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        request.setValue("ClaudeSleepPreventer/\(currentAppVersion())", forHTTPHeaderField: "User-Agent")
+
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            let result = self.parseLatestRelease(data: data, response: response, error: error)
+            DispatchQueue.main.async {
+                self.isCheckingForUpdates = false
+                UserDefaults.standard.set(Date(), forKey: self.lastUpdateCheckDefaultsKey)
+                self.handleUpdateCheckResult(result, mode: mode)
+            }
+        }.resume()
+    }
+
+    private func parseLatestRelease(
+        data: Data?,
+        response: URLResponse?,
+        error: Error?
+    ) -> Result<UpdateRelease, UpdateCheckError> {
+        if let error {
+            return .failure(UpdateCheckError(message: "Unable to contact GitHub: \(error.localizedDescription)"))
+        }
+
+        guard let httpResponse = response as? HTTPURLResponse else {
+            return .failure(UpdateCheckError(message: "GitHub update check returned an invalid response."))
+        }
+
+        guard (200...299).contains(httpResponse.statusCode) else {
+            return .failure(UpdateCheckError(message: "GitHub update check failed with HTTP \(httpResponse.statusCode)."))
+        }
+
+        guard let data else {
+            return .failure(UpdateCheckError(message: "GitHub update check returned no data."))
+        }
+
+        guard
+            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let tagName = json["tag_name"] as? String
+        else {
+            return .failure(UpdateCheckError(message: "Could not parse the latest GitHub release."))
+        }
+
+        let version = normalizedVersion(tagName)
+        if version.isEmpty {
+            return .failure(UpdateCheckError(message: "The latest GitHub release does not have a valid version tag."))
+        }
+
+        let releaseURL = URL(string: json["html_url"] as? String ?? "") ?? fallbackReleaseURL
+        let downloadURL = latestDMGURL(from: json) ?? releaseURL
+
+        return .success(
+            UpdateRelease(
+                version: version,
+                releaseURL: releaseURL,
+                downloadURL: downloadURL
+            )
+        )
+    }
+
+    private func latestDMGURL(from json: [String: Any]) -> URL? {
+        guard let assets = json["assets"] as? [[String: Any]] else {
+            return nil
+        }
+
+        for asset in assets {
+            guard
+                let name = asset["name"] as? String,
+                name.hasSuffix(".dmg"),
+                let download = asset["browser_download_url"] as? String,
+                let url = URL(string: download)
+            else {
+                continue
+            }
+            return url
+        }
+
+        return nil
+    }
+
+    private func handleUpdateCheckResult(
+        _ result: Result<UpdateRelease, UpdateCheckError>,
+        mode: UpdateCheckMode
+    ) {
+        switch result {
+        case .success(let release):
+            let currentVersion = currentAppVersion()
+            if isVersion(release.version, newerThan: currentVersion) {
+                availableUpdate = release
+                let skippedVersion = UserDefaults.standard.string(forKey: skippedUpdateVersionDefaultsKey)
+                if mode == .manual || skippedVersion != release.version {
+                    showUpdateAvailableAlert(release, mode: mode, currentVersion: currentVersion)
+                }
+            } else {
+                availableUpdate = nil
+                UserDefaults.standard.removeObject(forKey: skippedUpdateVersionDefaultsKey)
+                if mode == .manual {
+                    showUpToDateAlert(currentVersion: currentVersion)
+                }
+            }
+        case .failure(let error):
+            if mode == .manual {
+                showUpdateError(error.message)
+            }
+        }
+    }
+
+    private func currentAppVersion() -> String {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        return normalizedVersion(version ?? "0.0.0")
+    }
+
+    private func normalizedVersion(_ version: String) -> String {
+        var normalized = version.trimmingCharacters(in: .whitespacesAndNewlines)
+        if normalized.hasPrefix("v") {
+            normalized.removeFirst()
+        }
+        return normalized
+    }
+
+    private func isVersion(_ candidate: String, newerThan current: String) -> Bool {
+        normalizedVersion(candidate).compare(
+            normalizedVersion(current),
+            options: [.numeric]
+        ) == .orderedDescending
+    }
+
+    private func showUpdateAvailableAlert(
+        _ release: UpdateRelease,
+        mode: UpdateCheckMode,
+        currentVersion: String
+    ) {
+        let alert = NSAlert()
+        alert.messageText = "Update available"
+
+        let checkSource = mode == .automatic ? "A background update check found" : "A newer version is available"
+        alert.informativeText = """
+            \(checkSource): Claude Sleep Preventer \(release.version).
+            You are currently running \(currentVersion).
+
+            Download the latest DMG to update the app.
+            """
+
+        alert.addButton(withTitle: "Download")
+        alert.addButton(withTitle: "Later")
+        alert.addButton(withTitle: "Skip This Version")
+
+        let response = alert.runModal()
+        if response == .alertFirstButtonReturn {
+            openUpdate(release)
+            return
+        }
+        if response == .alertThirdButtonReturn {
+            UserDefaults.standard.set(release.version, forKey: skippedUpdateVersionDefaultsKey)
+        }
+    }
+
+    private func showUpToDateAlert(currentVersion: String) {
+        let alert = NSAlert()
+        alert.messageText = "You're up to date"
+        alert.informativeText = "Claude Sleep Preventer \(currentVersion) is the latest available version."
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+    }
+
+    private func showUpdateError(_ message: String) {
+        let alert = NSAlert()
+        alert.messageText = "Update check failed"
+        alert.informativeText = message
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+    }
+
+    private func openUpdate(_ release: UpdateRelease) {
+        if !NSWorkspace.shared.open(release.downloadURL) {
+            NSWorkspace.shared.open(release.releaseURL)
         }
     }
 
@@ -292,6 +542,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let hooksItem = NSMenuItem(title: hooksTitle, action: #selector(installHooksAction), keyEquivalent: "i")
         hooksItem.target = self
         menu.addItem(hooksItem)
+
+        menu.addItem(NSMenuItem.separator())
+
+        if let availableUpdate {
+            let downloadUpdateItem = NSMenuItem(
+                title: "Download Update \(availableUpdate.version)...",
+                action: #selector(downloadAvailableUpdateAction),
+                keyEquivalent: ""
+            )
+            downloadUpdateItem.target = self
+            menu.addItem(downloadUpdateItem)
+        }
+
+        let checkForUpdatesItem = NSMenuItem(
+            title: isCheckingForUpdates ? "Checking for Updates..." : "Check for Updates...",
+            action: #selector(checkForUpdatesAction),
+            keyEquivalent: ""
+        )
+        checkForUpdatesItem.target = self
+        checkForUpdatesItem.isEnabled = !isCheckingForUpdates
+        menu.addItem(checkForUpdatesItem)
 
         menu.addItem(NSMenuItem.separator())
 

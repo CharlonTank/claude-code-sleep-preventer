@@ -65,6 +65,8 @@ To publish a new version, prefer:
 
 **IMPORTANT**: Update the version number in README.md download links when releasing a new version.
 
+**IMPORTANT**: The menu bar app checks `GitHub Releases -> latest` for in-app updates and downloads the `.dmg` asset attached to the latest release. Keep semver tags in the `vX.Y.Z` format and publish the DMG asset on every release.
+
 ## macOS Permissions Notes
 
 - **Microphone**: App must call `AVCaptureDevice.requestAccessForMediaType:` to appear in System Preferences list. The system dialog triggers automatically.
