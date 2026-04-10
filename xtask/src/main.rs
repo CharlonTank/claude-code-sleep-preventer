@@ -299,6 +299,22 @@ fn codesign_runtime_with_entitlements(path: &Path, entitlements: &Path) -> Resul
     )
 }
 
+fn codesign_dmg(path: &Path) -> Result<()> {
+    run(
+        "codesign",
+        &[
+            "--force",
+            "--sign",
+            SIGNING_IDENTITY,
+            path.to_str().unwrap(),
+        ],
+    )?;
+    run(
+        "codesign",
+        &["--verify", "--verbose=2", path.to_str().unwrap()],
+    )
+}
+
 fn ensure_whisper_cli() -> Result<()> {
     let whisper_cli_path = Path::new("/tmp/whisper.cpp/build/bin/whisper-cli");
     if whisper_cli_path.exists() {
@@ -596,6 +612,9 @@ fn build_dmg(skip_notarize: bool) -> Result<()> {
         ],
     )?;
 
+    println!("  Signing DMG...");
+    codesign_dmg(Path::new(&dmg_name))?;
+
     // Cleanup staging
     fs::remove_dir_all(staging_dir)?;
 
@@ -618,6 +637,8 @@ fn build_dmg(skip_notarize: bool) -> Result<()> {
 
         println!("  Stapling...");
         run("xcrun", &["stapler", "staple", &dmg_name])?;
+        run("stapler", &["validate", &dmg_name])?;
+        run("spctl", &["-a", "-vv", "-t", "install", &dmg_name])?;
     }
 
     println!("\n=== Done! ===");
@@ -1118,6 +1139,8 @@ fn ensure_github_release(version: &str, release_notes_path: &Path, target: &str)
                 &title,
                 "--notes-file",
                 notes,
+                "--target",
+                target,
                 "--latest",
             ],
         )?;
