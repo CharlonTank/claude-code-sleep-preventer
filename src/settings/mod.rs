@@ -118,7 +118,10 @@ mod tests {
         let settings = AppSettings::default();
         assert!(settings.sleep_prevention.enabled);
         assert_eq!(settings.speech_to_text.language, "auto");
-        assert!(settings.speech_to_text.vocabulary_words.contains(&"Claude".to_string()));
+        assert!(settings
+            .speech_to_text
+            .vocabulary_words
+            .contains(&"Claude".to_string()));
     }
 
     #[test]

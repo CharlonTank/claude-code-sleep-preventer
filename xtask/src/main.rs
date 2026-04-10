@@ -2,7 +2,15 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+
+const SIGNING_IDENTITY: &str = "Developer ID Application";
+const SPARKLE_VERSION: &str = "2.9.0";
+const SPARKLE_RELEASE_URL: &str =
+    "https://github.com/sparkle-project/Sparkle/releases/download/2.9.0/Sparkle-for-Swift-Package-Manager.zip";
+const SPARKLE_KEY_ACCOUNT: &str = "CharlonTank-claude-sleep-preventer";
+const SPARKLE_APPCAST_ASSET_NAME: &str = "appcast.xml";
+const GITHUB_REPO: &str = "CharlonTank/claude-code-sleep-preventer";
 
 #[derive(Parser)]
 #[command(name = "xtask")]
@@ -151,6 +159,130 @@ fn run_output(cmd: &str, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+fn ensure_sparkle() -> Result<PathBuf> {
+    let sparkle_root = Path::new("target").join("sparkle").join(SPARKLE_VERSION);
+    let framework_dir = sparkle_root
+        .join("Sparkle.xcframework")
+        .join("macos-arm64_x86_64")
+        .join("Sparkle.framework");
+    let generate_appcast = sparkle_root.join("bin").join("generate_appcast");
+    let generate_keys = sparkle_root.join("bin").join("generate_keys");
+
+    if framework_dir.exists() && generate_appcast.exists() && generate_keys.exists() {
+        return Ok(sparkle_root);
+    }
+
+    println!("  Downloading Sparkle {}...", SPARKLE_VERSION);
+    fs::create_dir_all("target/sparkle")?;
+
+    let archive_path = Path::new("target")
+        .join("sparkle")
+        .join(format!("Sparkle-{}.zip", SPARKLE_VERSION));
+    if archive_path.exists() {
+        fs::remove_file(&archive_path)?;
+    }
+    if sparkle_root.exists() {
+        fs::remove_dir_all(&sparkle_root)?;
+    }
+
+    run(
+        "curl",
+        &[
+            "-L",
+            "-o",
+            archive_path.to_str().unwrap(),
+            SPARKLE_RELEASE_URL,
+        ],
+    )?;
+
+    fs::create_dir_all(&sparkle_root)?;
+    run(
+        "ditto",
+        &[
+            "-x",
+            "-k",
+            archive_path.to_str().unwrap(),
+            sparkle_root.to_str().unwrap(),
+        ],
+    )?;
+
+    if !framework_dir.exists() {
+        bail!(
+            "Sparkle framework missing after extraction: {}",
+            framework_dir.display()
+        );
+    }
+
+    Ok(sparkle_root)
+}
+
+fn github_repo_url() -> String {
+    format!("https://github.com/{}", GITHUB_REPO)
+}
+
+fn latest_appcast_url() -> String {
+    format!(
+        "{}/releases/latest/download/{}",
+        github_repo_url(),
+        SPARKLE_APPCAST_ASSET_NAME
+    )
+}
+
+fn release_asset_base_url(version: &str) -> String {
+    format!("{}/releases/download/v{}/", github_repo_url(), version)
+}
+
+fn release_tag_url(version: &str) -> String {
+    format!("{}/releases/tag/v{}", github_repo_url(), version)
+}
+
+fn copy_with_ditto(src: &Path, dst: &Path) -> Result<()> {
+    if dst.exists() {
+        if dst.is_dir() {
+            fs::remove_dir_all(dst)?;
+        } else {
+            fs::remove_file(dst)?;
+        }
+    }
+
+    if let Some(parent) = dst.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    run("ditto", &[src.to_str().unwrap(), dst.to_str().unwrap()])?;
+    Ok(())
+}
+
+fn codesign_runtime(path: &Path) -> Result<()> {
+    run(
+        "codesign",
+        &[
+            "--force",
+            "--options",
+            "runtime",
+            "--sign",
+            SIGNING_IDENTITY,
+            path.to_str().unwrap(),
+        ],
+    )
+}
+
+fn codesign_runtime_with_entitlements(path: &Path, entitlements: &Path) -> Result<()> {
+    run(
+        "codesign",
+        &[
+            "--force",
+            "--options",
+            "runtime",
+            "--entitlements",
+            entitlements.to_str().unwrap(),
+            "--sign",
+            SIGNING_IDENTITY,
+            path.to_str().unwrap(),
+        ],
+    )
+}
+
 fn ensure_whisper_cli() -> Result<()> {
     let whisper_cli_path = Path::new("/tmp/whisper.cpp/build/bin/whisper-cli");
     if whisper_cli_path.exists() {
@@ -202,9 +334,90 @@ fn ensure_whisper_cli() -> Result<()> {
     Ok(())
 }
 
+fn build_release_notes(version: &str, output_path: &Path) -> Result<()> {
+    let overrides_path = Path::new("release-notes").join(format!("{}.md", version));
+    if overrides_path.exists() {
+        fs::copy(overrides_path, output_path)?;
+        return Ok(());
+    }
+
+    let notes = format!(
+        "# Claude Sleep Preventer {version}\n\nThis release includes improvements and fixes.\n\nSee the full release notes on GitHub:\n{release_url}\n",
+        release_url = release_tag_url(version)
+    );
+    fs::write(output_path, notes)?;
+    Ok(())
+}
+
+fn generate_appcast(version: &str) -> Result<PathBuf> {
+    let sparkle_root = ensure_sparkle()?;
+    let generate_appcast_bin = sparkle_root.join("bin").join("generate_appcast");
+    let staging_dir = Path::new("target").join("release").join("sparkle-appcast");
+    if staging_dir.exists() {
+        fs::remove_dir_all(&staging_dir)?;
+    }
+    fs::create_dir_all(&staging_dir)?;
+
+    let dmg_name = format!("ClaudeSleepPreventer-{}.dmg", version);
+    let dmg_source = Path::new(&dmg_name);
+    let dmg_staging_path = staging_dir.join(&dmg_name);
+    fs::copy(dmg_source, &dmg_staging_path)?;
+
+    let release_notes_path = staging_dir.join(format!("ClaudeSleepPreventer-{}.md", version));
+    build_release_notes(version, &release_notes_path)?;
+
+    let appcast_path = staging_dir.join(SPARKLE_APPCAST_ASSET_NAME);
+    let curl_status = Command::new("curl")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .args([
+            "-fsSL",
+            "-o",
+            appcast_path.to_str().unwrap(),
+            &latest_appcast_url(),
+        ])
+        .status()?;
+    if !curl_status.success() && appcast_path.exists() {
+        fs::remove_file(&appcast_path)?;
+    }
+
+    let download_prefix = release_asset_base_url(version);
+    let release_url = release_tag_url(version);
+    let repo_url = github_repo_url();
+    let args = vec![
+        "--account",
+        SPARKLE_KEY_ACCOUNT,
+        "--download-url-prefix",
+        download_prefix.as_str(),
+        "--embed-release-notes",
+        "--full-release-notes-url",
+        release_url.as_str(),
+        "--link",
+        repo_url.as_str(),
+        "--versions",
+        version,
+        "-o",
+        appcast_path.to_str().unwrap(),
+        staging_dir.to_str().unwrap(),
+    ];
+    run(generate_appcast_bin.to_str().unwrap(), &args)?;
+
+    if !appcast_path.exists() {
+        bail!(
+            "Failed to generate Sparkle appcast at {}",
+            appcast_path.display()
+        );
+    }
+
+    Ok(appcast_path)
+}
+
 fn build_dmg(skip_notarize: bool) -> Result<()> {
     let version = get_version()?;
     let dmg_name = format!("ClaudeSleepPreventer-{}.dmg", version);
+    let sparkle_root = ensure_sparkle()?;
+    let sparkle_framework_slice = sparkle_root.join("Sparkle.xcframework/macos-arm64_x86_64");
+    let sparkle_framework = sparkle_framework_slice.join("Sparkle.framework");
 
     println!("=== Building Claude Sleep Preventer v{} DMG ===\n", version);
 
@@ -225,6 +438,14 @@ fn build_dmg(skip_notarize: bool) -> Result<()> {
             "swift/menubar.swift",
             "-parse-as-library",
             "-O",
+            "-F",
+            sparkle_framework_slice.to_str().unwrap(),
+            "-framework",
+            "Sparkle",
+            "-Xlinker",
+            "-rpath",
+            "-Xlinker",
+            "@executable_path/../Frameworks",
             "-o",
             "target/release/ClaudeSleepPreventer",
         ],
@@ -257,6 +478,7 @@ fn build_dmg(skip_notarize: bool) -> Result<()> {
     let app_dir = bundle_dir.join("ClaudeSleepPreventer.app");
     let contents_dir = app_dir.join("Contents");
     let macos_dir = contents_dir.join("MacOS");
+    let frameworks_dir = contents_dir.join("Frameworks");
     let resources_dir = contents_dir.join("Resources");
 
     // Clean and recreate
@@ -264,6 +486,7 @@ fn build_dmg(skip_notarize: bool) -> Result<()> {
         fs::remove_dir_all(bundle_dir)?;
     }
     fs::create_dir_all(&macos_dir)?;
+    fs::create_dir_all(&frameworks_dir)?;
     fs::create_dir_all(&resources_dir)?;
 
     // Copy main app binary (Swift)
@@ -278,6 +501,10 @@ fn build_dmg(skip_notarize: bool) -> Result<()> {
     )?;
     fs::copy("Info.plist", contents_dir.join("Info.plist"))?;
     fs::copy("AppIcon.icns", resources_dir.join("AppIcon.icns"))?;
+    copy_with_ditto(
+        &sparkle_framework,
+        &frameworks_dir.join("Sparkle.framework"),
+    )?;
 
     // Copy bundled binaries to Resources
     fs::copy(
@@ -286,60 +513,21 @@ fn build_dmg(skip_notarize: bool) -> Result<()> {
     )?;
     fs::copy(whisper_cli_path, resources_dir.join("whisper-cli"))?;
 
-    // Step 6: Sign Resources binaries first (must be signed before main app)
-    println!("[6/10] Signing Resources binaries...");
-    run(
-        "codesign",
-        &[
-            "--force",
-            "--options",
-            "runtime",
-            "--sign",
-            "Developer ID Application",
-            macos_dir
-                .join("claude-sleep-preventer")
-                .to_str()
-                .unwrap(),
-        ],
-    )?;
-    run(
-        "codesign",
-        &[
-            "--force",
-            "--options",
-            "runtime",
-            "--sign",
-            "Developer ID Application",
-            resources_dir.join("globe-listener").to_str().unwrap(),
-        ],
-    )?;
-    run(
-        "codesign",
-        &[
-            "--force",
-            "--options",
-            "runtime",
-            "--sign",
-            "Developer ID Application",
-            resources_dir.join("whisper-cli").to_str().unwrap(),
-        ],
-    )?;
+    // Step 6: Sign bundled binaries and Sparkle before the app bundle itself
+    println!("[6/10] Signing bundled binaries...");
+    codesign_runtime(&macos_dir.join("claude-sleep-preventer"))?;
+    codesign_runtime(&resources_dir.join("globe-listener"))?;
+    codesign_runtime(&resources_dir.join("whisper-cli"))?;
+    let sparkle_bundle = frameworks_dir.join("Sparkle.framework");
+    codesign_runtime(&sparkle_bundle.join("Versions/B/Autoupdate"))?;
+    codesign_runtime(&sparkle_bundle.join("Versions/B/XPCServices/Downloader.xpc"))?;
+    codesign_runtime(&sparkle_bundle.join("Versions/B/XPCServices/Installer.xpc"))?;
+    codesign_runtime(&sparkle_bundle.join("Versions/B/Updater.app"))?;
+    codesign_runtime(&sparkle_bundle)?;
 
     // Step 7: Sign the app with entitlements
     println!("[7/10] Signing app with entitlements...");
-    run(
-        "codesign",
-        &[
-            "--force",
-            "--options",
-            "runtime",
-            "--entitlements",
-            "Entitlements.plist",
-            "--sign",
-            "Developer ID Application",
-            app_dir.to_str().unwrap(),
-        ],
-    )?;
+    codesign_runtime_with_entitlements(&app_dir, Path::new("Entitlements.plist"))?;
 
     // Step 8: Create DMG staging folder with Applications symlink
     println!("[8/10] Creating DMG staging folder...");
@@ -349,8 +537,8 @@ fn build_dmg(skip_notarize: bool) -> Result<()> {
     }
     fs::create_dir_all(staging_dir)?;
 
-    // Copy app to staging
-    copy_dir_recursive(&app_dir, &staging_dir.join("ClaudeSleepPreventer.app"))?;
+    // Copy app to staging preserving Sparkle framework symlinks and code signatures
+    copy_with_ditto(&app_dir, &staging_dir.join("ClaudeSleepPreventer.app"))?;
 
     // Create Applications symlink - THIS IS THE KEY PART
     #[cfg(unix)]
@@ -407,23 +595,6 @@ fn build_dmg(skip_notarize: bool) -> Result<()> {
     Ok(())
 }
 
-fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
-    fs::create_dir_all(dst)?;
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let ty = entry.file_type()?;
-        let src_path = entry.path();
-        let dst_path = dst.join(entry.file_name());
-
-        if ty.is_dir() {
-            copy_dir_recursive(&src_path, &dst_path)?;
-        } else {
-            fs::copy(&src_path, &dst_path)?;
-        }
-    }
-    Ok(())
-}
-
 fn clean(keep_model: bool) -> Result<()> {
     println!("=== Claude Sleep Preventer Cleanup ===\n");
     if keep_model {
@@ -446,7 +617,10 @@ fn clean(keep_model: bool) -> Result<()> {
     // Remove app data
     println!("Removing app data...");
     if let Some(home) = dirs::home_dir() {
-        clean_app_support_dir(&home.join("Library/Application Support/ClaudeSleepPreventer"), keep_model)?;
+        clean_app_support_dir(
+            &home.join("Library/Application Support/ClaudeSleepPreventer"),
+            keep_model,
+        )?;
         clean_app_support_dir(&home.join(".local/share/ClaudeSleepPreventer"), keep_model)?;
 
         let _ = fs::remove_dir_all(home.join("Library/Logs/ClaudeSleepPreventer"));
@@ -462,7 +636,11 @@ fn clean(keep_model: bool) -> Result<()> {
         if launch_agent.exists() {
             let uid = run_output("id", &["-u"])?;
             let _ = Command::new("launchctl")
-                .args(["bootout", &format!("gui/{}", uid.trim()), launch_agent.to_str().unwrap()])
+                .args([
+                    "bootout",
+                    &format!("gui/{}", uid.trim()),
+                    launch_agent.to_str().unwrap(),
+                ])
                 .status();
             let _ = fs::remove_file(&launch_agent);
         }
@@ -523,7 +701,11 @@ fn clean(keep_model: bool) -> Result<()> {
     println!("Resetting TCC permissions...");
     for permission in ["Microphone", "Accessibility", "ListenEvent"] {
         let _ = Command::new("tccutil")
-            .args(["reset", permission, "com.charlontank.claude-sleep-preventer"])
+            .args([
+                "reset",
+                permission,
+                "com.charlontank.claude-sleep-preventer",
+            ])
             .status();
     }
 
@@ -579,14 +761,58 @@ fn replace_app(open_app: bool) -> Result<()> {
     if !app_dir.exists() {
         bail!("Missing /Applications/ClaudeSleepPreventer.app");
     }
+    let sparkle_root = ensure_sparkle()?;
+    let sparkle_framework_slice = sparkle_root.join("Sparkle.xcframework/macos-arm64_x86_64");
+    let sparkle_framework = sparkle_framework_slice.join("Sparkle.framework");
 
     println!("=== Replace App ===\n");
     println!("Building release...");
     run("cargo", &["build", "--release"])?;
+    run(
+        "swiftc",
+        &[
+            "swift/menubar.swift",
+            "-parse-as-library",
+            "-O",
+            "-F",
+            sparkle_framework_slice.to_str().unwrap(),
+            "-framework",
+            "Sparkle",
+            "-Xlinker",
+            "-rpath",
+            "-Xlinker",
+            "@executable_path/../Frameworks",
+            "-o",
+            "target/release/ClaudeSleepPreventer",
+        ],
+    )?;
+    run(
+        "swiftc",
+        &[
+            "swift/globe-listener.swift",
+            "-O",
+            "-o",
+            "target/release/globe-listener",
+        ],
+    )?;
 
     let bin_path = app_dir.join("Contents/MacOS/claude-sleep-preventer");
+    let menubar_path = app_dir.join("Contents/MacOS/ClaudeSleepPreventer");
     let plist_path = app_dir.join("Contents/Info.plist");
+    let resources_dir = app_dir.join("Contents/Resources");
+    let frameworks_dir = app_dir.join("Contents/Frameworks");
     fs::copy("target/release/claude-sleep-preventer", &bin_path)?;
+    fs::copy("target/release/ClaudeSleepPreventer", &menubar_path)?;
+    fs::create_dir_all(&resources_dir)?;
+    fs::create_dir_all(&frameworks_dir)?;
+    fs::copy(
+        "target/release/globe-listener",
+        resources_dir.join("globe-listener"),
+    )?;
+    copy_with_ditto(
+        &sparkle_framework,
+        &frameworks_dir.join("Sparkle.framework"),
+    )?;
     fs::copy("Info.plist", &plist_path)?;
 
     println!("Signing app...");
@@ -615,11 +841,22 @@ fn release(version: &str, skip_notarize: bool, upload: bool) -> Result<()> {
     bump_version(version)?;
     ensure_whisper_cli()?;
     build_dmg(skip_notarize)?;
+    let appcast_path = generate_appcast(version)?;
 
     if upload {
         let dmg_name = format!("ClaudeSleepPreventer-{}.dmg", version);
         let tag = format!("v{}", version);
-        run("gh", &["release", "upload", &tag, &dmg_name, "--clobber"])?;
+        run(
+            "gh",
+            &[
+                "release",
+                "upload",
+                &tag,
+                &dmg_name,
+                appcast_path.to_str().unwrap(),
+                "--clobber",
+            ],
+        )?;
     }
 
     println!("Release artifacts ready for {}", version);
@@ -636,6 +873,8 @@ fn bump_version(version: &str) -> Result<()> {
     replace_version_in_file("Cargo.toml", &current, version)?;
     replace_version_in_file("Info.plist", &current, version)?;
     replace_version_in_file("README.md", &current, version)?;
+    replace_version_in_file("distribution.xml", &current, version)?;
+    replace_version_in_file("distribution-synth.xml", &current, version)?;
 
     Ok(())
 }

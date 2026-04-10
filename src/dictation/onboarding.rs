@@ -10,13 +10,12 @@ use crate::native_dialogs::{
     self, PermissionToggle, PermissionsAction, PermissionsWindow, PermissionsWindowHandle,
 };
 
-use super::audio::{check_microphone_permission, request_microphone_permission_sync, MicrophonePermission};
-use super::globe_key::{
-    check_input_monitoring_permission,
-    request_input_monitoring_permission,
+use super::audio::{
+    check_microphone_permission, request_microphone_permission_sync, MicrophonePermission,
 };
+use super::globe_key::{check_input_monitoring_permission, request_input_monitoring_permission};
 use super::text_injection::check_accessibility_permission;
-use super::transcription::{WhisperTranscriber, DictationSetupStatus};
+use super::transcription::{DictationSetupStatus, WhisperTranscriber};
 
 /// Check if this is the first launch (no preferences file exists)
 fn is_first_launch() -> bool {
@@ -116,7 +115,11 @@ Autorisez ces acces pour activer la dictee vocale."#;
 }
 
 fn permission_button_label(granted: bool) -> &'static str {
-    if granted { "Autorise" } else { "Autoriser" }
+    if granted {
+        "Autorise"
+    } else {
+        "Autoriser"
+    }
 }
 
 fn update_permission_toggles(window: &PermissionsWindow) {

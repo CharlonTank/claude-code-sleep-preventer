@@ -8,13 +8,13 @@ mod settings;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use dictation::{run_onboarding_if_needed, DictationManager};
 use core_foundation::base::{kCFAllocatorDefault, TCFType};
 use core_foundation::boolean::CFBoolean;
 use core_foundation::runloop::{
     kCFRunLoopDefaultMode, CFRunLoopAddSource, CFRunLoopGetCurrent, CFRunLoopRun,
 };
 use core_foundation::string::CFString;
+use dictation::{run_onboarding_if_needed, DictationManager};
 use global_hotkey::{
     hotkey::{Code, HotKey, Modifiers},
     GlobalHotKeyEvent, GlobalHotKeyManager,
@@ -27,7 +27,7 @@ use serde_json::json;
 use std::fs;
 use std::io::Write;
 use std::os::unix::io::AsRawFd;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -41,10 +41,7 @@ use tao::event_loop::{ControlFlow, EventLoopBuilder};
 use tao::platform::macos::{ActivationPolicy, EventLoopExtMacOS};
 use tray_icon::{
     menu::{Menu, MenuEvent, MenuItem},
-    MouseButton,
-    MouseButtonState,
-    TrayIconBuilder,
-    TrayIconEvent,
+    MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent,
 };
 
 static LID_JUST_CLOSED: AtomicBool = AtomicBool::new(false);
@@ -77,9 +74,7 @@ enum Commands {
     /// List active/inactive instances as JSON
     List,
     /// Focus a Claude instance by PID
-    Focus {
-        pid: u32,
-    },
+    Focus { pid: u32 },
     /// Clean up stale PIDs (interrupted sessions)
     Cleanup,
     /// Run as daemon with cleanup + thermal monitoring
@@ -135,7 +130,11 @@ fn main() -> Result<()> {
         Commands::Reset => cmd_reset()?,
         Commands::Thermal => cmd_thermal()?,
         Commands::Install { yes } => cmd_install(yes)?,
-        Commands::Uninstall { keep_model, keep_hooks, keep_data } => cmd_uninstall(keep_model, keep_hooks, keep_data)?,
+        Commands::Uninstall {
+            keep_model,
+            keep_hooks,
+            keep_data,
+        } => cmd_uninstall(keep_model, keep_hooks, keep_data)?,
         Commands::Settings => cmd_settings()?,
         Commands::Debug => cmd_debug()?,
     }
@@ -214,7 +213,6 @@ fn set_sleep_disabled(disabled: bool) -> Result<()> {
     }
     Ok(())
 }
-
 
 fn menubar_sync_sleep() {
     let manual_enabled = MANUAL_SLEEP_PREVENTION.load(Ordering::SeqCst);
@@ -415,7 +413,10 @@ fn get_all_claude_pids() -> Vec<u32> {
 
 fn get_inactive_claude_pids() -> Vec<u32> {
     let all_pids = get_all_claude_pids();
-    let active_pids: Vec<u32> = get_instance_items().iter().map(|(pid, _, _, _)| *pid).collect();
+    let active_pids: Vec<u32> = get_instance_items()
+        .iter()
+        .map(|(pid, _, _, _)| *pid)
+        .collect();
     all_pids
         .into_iter()
         .filter(|pid| !active_pids.contains(pid))
@@ -762,7 +763,8 @@ Administrator password required.";
         return Ok(());
     }
 
-    let script = "/Applications/ClaudeSleepPreventer.app/Contents/MacOS/claude-sleep-preventer install -y";
+    let script =
+        "/Applications/ClaudeSleepPreventer.app/Contents/MacOS/claude-sleep-preventer install -y";
 
     match authorization::execute_script_with_privileges(script) {
         Ok(true) => {
@@ -776,10 +778,7 @@ Administrator password required.";
             // User cancelled
         }
         Err(e) => {
-            native_dialogs::show_dialog(
-                &format!("Setup failed: {}", e),
-                "Claude Sleep Preventer",
-            );
+            native_dialogs::show_dialog(&format!("Setup failed: {}", e), "Claude Sleep Preventer");
         }
     }
 
@@ -796,10 +795,7 @@ fn relaunch_app_after_install() {
             std::process::exit(0);
         }
         Ok(status) => {
-            logging::log(&format!(
-                "[main] Relaunch failed with status: {}",
-                status
-            ));
+            logging::log(&format!("[main] Relaunch failed with status: {}", status));
         }
         Err(e) => {
             logging::log(&format!("[main] Relaunch failed: {}", e));
@@ -1065,7 +1061,8 @@ fn cmd_menubar() -> Result<()> {
                 popover.hide();
                 if let Some(new_settings) = settings::window::show_settings() {
                     // Update manual sleep prevention based on settings
-                    MANUAL_SLEEP_PREVENTION.store(new_settings.sleep_prevention.enabled, Ordering::SeqCst);
+                    MANUAL_SLEEP_PREVENTION
+                        .store(new_settings.sleep_prevention.enabled, Ordering::SeqCst);
                     menubar_sync_sleep();
                     logging::log(&format!(
                         "[menu] Settings saved: sleep_enabled={}",
@@ -1140,19 +1137,20 @@ fn cmd_menubar() -> Result<()> {
                 if event.id == hotkey_active_id {
                     let instances = get_instance_items();
                     if !instances.is_empty() {
-                        let idx = CURRENT_PID_INDEX.fetch_add(1, Ordering::SeqCst) % instances.len();
+                        let idx =
+                            CURRENT_PID_INDEX.fetch_add(1, Ordering::SeqCst) % instances.len();
                         focus_terminal_by_pid(instances[idx].0);
                     }
                 } else if event.id == hotkey_inactive_id {
                     let inactive = get_inactive_claude_pids();
                     if !inactive.is_empty() {
-                        let idx = CURRENT_INACTIVE_INDEX.fetch_add(1, Ordering::SeqCst) % inactive.len();
+                        let idx =
+                            CURRENT_INACTIVE_INDEX.fetch_add(1, Ordering::SeqCst) % inactive.len();
                         focus_terminal_by_pid(inactive[idx]);
                     }
                 }
             }
         }
-
     });
 }
 
@@ -1275,11 +1273,46 @@ fn ask_yes_no(prompt: &str) -> bool {
     answer.is_empty() || answer == "y" || answer == "yes"
 }
 
+fn sync_installed_cli() -> Result<bool> {
+    let current_exe = std::env::current_exe().context("Could not find current executable")?;
+    let target = Path::new("/usr/local/bin/claude-sleep-preventer");
+
+    if current_exe == target {
+        return Ok(false);
+    }
+
+    fs::create_dir_all("/usr/local/bin")?;
+    fs::copy(&current_exe, target).with_context(|| {
+        format!(
+            "Failed to copy {} to {}",
+            current_exe.display(),
+            target.display()
+        )
+    })?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(target, fs::Permissions::from_mode(0o755))?;
+    }
+
+    Ok(true)
+}
+
 fn cmd_install(auto_yes: bool) -> Result<()> {
     let home = dirs::home_dir().context("Could not find home directory")?;
     let hooks_dir = home.join(".claude").join("hooks");
     let settings_file = home.join(".claude").join("settings.json");
     let launch_agents_dir = home.join("Library/LaunchAgents");
+
+    match sync_installed_cli() {
+        Ok(true) => println!("Updated /usr/local/bin/claude-sleep-preventer"),
+        Ok(false) => {}
+        Err(e) => eprintln!(
+            "Warning: could not update /usr/local/bin/claude-sleep-preventer: {}",
+            e
+        ),
+    }
 
     fs::create_dir_all(&hooks_dir)?;
 
@@ -1321,10 +1354,7 @@ fn cmd_install(auto_yes: bool) -> Result<()> {
     let real_user = std::env::var("SUDO_USER")
         .or_else(|_| std::env::var("USER"))
         .unwrap_or_default();
-    let sudoers_content = format!(
-        "{} ALL=(ALL) NOPASSWD: /usr/bin/pmset\n",
-        real_user
-    );
+    let sudoers_content = format!("{} ALL=(ALL) NOPASSWD: /usr/bin/pmset\n", real_user);
 
     // Write directly if we're root, otherwise use sudo
     let is_root = unsafe { libc::geteuid() == 0 };
@@ -1359,15 +1389,21 @@ fn cmd_install(auto_yes: bool) -> Result<()> {
 
     println!("Configuring Claude Code hooks...");
 
-    let hooks_json = r#"{
-    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "$HOME/.claude/hooks/prevent-sleep.sh" }] }],
-    "PreToolUse": [{ "hooks": [{ "type": "command", "command": "$HOME/.claude/hooks/prevent-sleep.sh" }] }],
-    "PreCompact": [{ "hooks": [{ "type": "command", "command": "$HOME/.claude/hooks/prevent-sleep.sh" }] }],
-    "Stop": [{ "hooks": [{ "type": "command", "command": "$HOME/.claude/hooks/allow-sleep.sh" }] }]
-}"#;
+    let prevent_path = hooks_dir.join("prevent-sleep.sh");
+    let allow_path = hooks_dir.join("allow-sleep.sh");
+    let hooks_json = format!(
+        r#"{{
+    "UserPromptSubmit": [{{ "hooks": [{{ "type": "command", "command": "{prevent}" }}] }}],
+    "PreToolUse": [{{ "hooks": [{{ "type": "command", "command": "{prevent}" }}] }}],
+    "PreCompact": [{{ "hooks": [{{ "type": "command", "command": "{prevent}" }}] }}],
+    "Stop": [{{ "hooks": [{{ "type": "command", "command": "{allow}" }}] }}]
+}}"#,
+        prevent = prevent_path.display(),
+        allow = allow_path.display(),
+    );
 
     let hooks: serde_json::Value =
-        serde_json::from_str(hooks_json).context("Failed to parse hooks JSON")?;
+        serde_json::from_str(&hooks_json).context("Failed to parse hooks JSON")?;
 
     if settings_file.exists() {
         let content = fs::read_to_string(&settings_file)
@@ -1396,9 +1432,7 @@ fn cmd_install(auto_yes: bool) -> Result<()> {
     }
 
     if is_root {
-        Command::new("pmset")
-            .args(["-a", "sleep", "5"])
-            .output()?;
+        Command::new("pmset").args(["-a", "sleep", "5"]).output()?;
         Command::new("pmset")
             .args(["-a", "disablesleep", "0"])
             .output()?;
@@ -1423,7 +1457,8 @@ fn cmd_install(auto_yes: bool) -> Result<()> {
     <string>com.charlontank.claude-sleep-preventer</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/Applications/ClaudeSleepPreventer.app/Contents/MacOS/claude-sleep-preventer</string>
+        <string>/usr/bin/open</string>
+        <string>/Applications/ClaudeSleepPreventer.app</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -1473,7 +1508,8 @@ fn cmd_uninstall(keep_model: bool, keep_hooks: bool, keep_data: bool) -> Result<
                 if let Ok(mut json) = serde_json::from_str::<serde_json::Value>(&content) {
                     if json.get("hooks").is_some() {
                         json.as_object_mut().unwrap().remove("hooks");
-                        let _ = fs::write(&settings_file, serde_json::to_string_pretty(&json).unwrap());
+                        let _ =
+                            fs::write(&settings_file, serde_json::to_string_pretty(&json).unwrap());
                         println!("Removed hooks from settings.json");
                     }
                 }
@@ -1560,8 +1596,7 @@ fn cmd_settings() -> Result<()> {
     if let Some(new_settings) = settings::window::show_settings() {
         logging::log(&format!(
             "[settings] Settings saved: sleep_enabled={}, language={}",
-            new_settings.sleep_prevention.enabled,
-            new_settings.speech_to_text.language
+            new_settings.sleep_prevention.enabled, new_settings.speech_to_text.language
         ));
     } else {
         logging::log("[settings] Settings cancelled");

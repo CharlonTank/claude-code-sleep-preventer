@@ -89,7 +89,11 @@ pub fn main_bundle_path() -> Option<String> {
 
 #[link(name = "CoreFoundation", kind = "framework")]
 extern "C" {
-    fn CFRunLoopRunInMode(mode: *const c_void, seconds: f64, return_after_source_handled: bool) -> i32;
+    fn CFRunLoopRunInMode(
+        mode: *const c_void,
+        seconds: f64,
+        return_after_source_handled: bool,
+    ) -> i32;
 }
 
 pub fn pump_run_loop_once() {

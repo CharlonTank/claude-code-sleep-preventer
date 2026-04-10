@@ -1,12 +1,11 @@
-use objc::{class, msg_send, sel, sel_impl};
 use objc::runtime::{BOOL, YES};
+use objc::{class, msg_send, sel, sel_impl};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::logging;
 use crate::objc_utils::{
     CGFloat, Id, NSPoint, NSRect, NSSize, NIL, NS_BACKING_STORE_BUFFERED,
-    NS_WINDOW_COLLECTION_BEHAVIOR_CAN_JOIN_ALL_SPACES,
-    NS_WINDOW_COLLECTION_BEHAVIOR_IGNORES_CYCLE,
+    NS_WINDOW_COLLECTION_BEHAVIOR_CAN_JOIN_ALL_SPACES, NS_WINDOW_COLLECTION_BEHAVIOR_IGNORES_CYCLE,
     NS_WINDOW_COLLECTION_BEHAVIOR_STATIONARY, NS_WINDOW_STYLE_MASK_BORDERLESS,
 };
 

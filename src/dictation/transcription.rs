@@ -53,8 +53,8 @@ impl WhisperTranscriber {
 
         // Try common homebrew locations (not in PATH when launched from /Applications)
         let homebrew_paths = [
-            "/opt/homebrew/bin/whisper-cli",  // Apple Silicon
-            "/usr/local/bin/whisper-cli",     // Intel Mac
+            "/opt/homebrew/bin/whisper-cli", // Apple Silicon
+            "/usr/local/bin/whisper-cli",    // Intel Mac
         ];
 
         for path in homebrew_paths {
@@ -257,10 +257,7 @@ fn download_model_with_progress(
                     if whole != last_percent {
                         last_percent = whole;
                         progress.set_progress(percent);
-                        progress.set_message(&format!(
-                            "Downloading Whisper model... {}%",
-                            whole
-                        ));
+                        progress.set_message(&format!("Downloading Whisper model... {}%", whole));
                     }
                 }
                 line.clear();

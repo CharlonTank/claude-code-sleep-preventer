@@ -113,20 +113,11 @@ mod hid {
             options: IOOptionBits,
         ) -> IOHIDManagerRef;
 
-        pub fn IOHIDManagerSetDeviceMatching(
-            manager: IOHIDManagerRef,
-            matching: *const c_void,
-        );
+        pub fn IOHIDManagerSetDeviceMatching(manager: IOHIDManagerRef, matching: *const c_void);
 
-        pub fn IOHIDManagerOpen(
-            manager: IOHIDManagerRef,
-            options: IOOptionBits,
-        ) -> IOReturn;
+        pub fn IOHIDManagerOpen(manager: IOHIDManagerRef, options: IOOptionBits) -> IOReturn;
 
-        pub fn IOHIDManagerClose(
-            manager: IOHIDManagerRef,
-            options: IOOptionBits,
-        ) -> IOReturn;
+        pub fn IOHIDManagerClose(manager: IOHIDManagerRef, options: IOOptionBits) -> IOReturn;
 
         pub fn IOHIDManagerScheduleWithRunLoop(
             manager: IOHIDManagerRef,
@@ -300,10 +291,16 @@ pub fn request_input_monitoring_permission() -> bool {
 
     std::thread::spawn(|| {
         let probe_ok = probe_input_monitoring_event_tap();
-        logging::log(&format!("[input_monitoring] probe event tap -> {}", probe_ok));
+        logging::log(&format!(
+            "[input_monitoring] probe event tap -> {}",
+            probe_ok
+        ));
 
         let hid_ok = probe_input_monitoring_iohid_manager();
-        logging::log(&format!("[input_monitoring] probe IOHIDManager -> {}", hid_ok));
+        logging::log(&format!(
+            "[input_monitoring] probe IOHIDManager -> {}",
+            hid_ok
+        ));
 
         let granted = check_input_monitoring_permission();
         logging::log(&format!(
@@ -316,8 +313,7 @@ pub fn request_input_monitoring_permission() -> bool {
 }
 
 fn probe_input_monitoring_event_tap() -> bool {
-    let event_mask: ffi::CGEventMask =
-        (1u64 << ffi::K_CG_EVENT_KEY_DOWN)
+    let event_mask: ffi::CGEventMask = (1u64 << ffi::K_CG_EVENT_KEY_DOWN)
         | (1u64 << ffi::K_CG_EVENT_KEY_UP)
         | (1u64 << ffi::K_CG_EVENT_FLAGS_CHANGED);
     let tap = unsafe {
@@ -511,7 +507,9 @@ extern "C" fn event_tap_callback(
         }
         let tap = EVENT_TAP.load(Ordering::SeqCst);
         if !tap.is_null() {
-            unsafe { ffi::CGEventTapEnable(tap as ffi::CFMachPortRef, true); }
+            unsafe {
+                ffi::CGEventTapEnable(tap as ffi::CFMachPortRef, true);
+            }
         }
         return event;
     }
@@ -575,8 +573,7 @@ fn run_event_tap(tx: Sender<GlobeKeyEvent>, stop_flag: Arc<AtomicBool>) {
     }
 
     // Event mask for flags changed
-    let event_mask: ffi::CGEventMask =
-        (1u64 << ffi::K_CG_EVENT_FLAGS_CHANGED)
+    let event_mask: ffi::CGEventMask = (1u64 << ffi::K_CG_EVENT_FLAGS_CHANGED)
         | (1u64 << ffi::K_CG_EVENT_KEY_DOWN)
         | (1u64 << ffi::K_CG_EVENT_KEY_UP);
 

@@ -15,12 +15,13 @@ pub fn check_microphone_permission() -> MicrophonePermission {
         let media_type: *mut objc::runtime::Object =
             msg_send![class!(NSString), stringWithUTF8String: b"soun\0".as_ptr()];
 
-        let status: i64 = msg_send![class!(AVCaptureDevice), authorizationStatusForMediaType: media_type];
+        let status: i64 =
+            msg_send![class!(AVCaptureDevice), authorizationStatusForMediaType: media_type];
 
         match status {
             0 => MicrophonePermission::NotDetermined,
-            1 => MicrophonePermission::Denied,  // Restricted
-            2 => MicrophonePermission::Denied,  // Denied
+            1 => MicrophonePermission::Denied, // Restricted
+            2 => MicrophonePermission::Denied, // Denied
             3 => MicrophonePermission::Granted,
             _ => MicrophonePermission::Denied,
         }
@@ -101,9 +102,7 @@ impl AudioRecorder {
 
     pub fn start_recording(&mut self) -> Result<(), String> {
         let host = cpal::default_host();
-        let device = host
-            .default_input_device()
-            .ok_or("No audio input device")?;
+        let device = host.default_input_device().ok_or("No audio input device")?;
 
         let config = device
             .default_input_config()
@@ -244,5 +243,4 @@ impl AudioRecorder {
 
         output
     }
-
 }

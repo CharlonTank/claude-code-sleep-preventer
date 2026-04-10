@@ -1,3 +1,10 @@
 #!/bin/bash
+APP_CLI="/Applications/ClaudeSleepPreventer.app/Contents/MacOS/claude-sleep-preventer"
+
+if [ -x "$APP_CLI" ]; then
+    install -d /usr/local/bin
+    install -m 755 "$APP_CLI" /usr/local/bin/claude-sleep-preventer
+fi
+
 open -a 'ClaudeSleepPreventer'
 exit 0

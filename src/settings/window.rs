@@ -236,8 +236,8 @@ impl SettingsWindow {
         let state_ptr = Arc::into_raw(state.clone());
         let state_ptr_send = SendPtr(state_ptr as *mut c_void);
 
-        let (window, target, vocabulary_text_view, previous_policy) =
-            run_on_main_thread(move || unsafe {
+        let (window, target, vocabulary_text_view, previous_policy) = run_on_main_thread(
+            move || unsafe {
                 let _pool = AutoreleasePool::new();
 
                 let app: Id = msg_send![class!(NSApplication), sharedApplication];
@@ -310,18 +310,18 @@ impl SettingsWindow {
                 let body_color = ns_color(0.70, 0.70, 0.70, 1.0);
 
                 // Sleep prevention toggle - centered vertically in the tab
-                let toggle_label_frame = NSRect::new(
-                    NSPoint::new(20.0, 160.0),
-                    NSSize::new(300.0, 20.0),
+                let toggle_label_frame =
+                    NSRect::new(NSPoint::new(20.0, 160.0), NSSize::new(300.0, 20.0));
+                let toggle_label = create_label(
+                    "Enable Sleep Prevention",
+                    toggle_label_frame,
+                    title_font,
+                    title_color,
                 );
-                let toggle_label =
-                    create_label("Enable Sleep Prevention", toggle_label_frame, title_font, title_color);
                 let _: () = msg_send![tab1_view, addSubview: toggle_label];
 
-                let toggle_desc_frame = NSRect::new(
-                    NSPoint::new(20.0, 115.0),
-                    NSSize::new(380.0, 40.0),
-                );
+                let toggle_desc_frame =
+                    NSRect::new(NSPoint::new(20.0, 115.0), NSSize::new(380.0, 40.0));
                 let toggle_desc = create_label(
                     "When enabled, prevents your Mac from sleeping while Claude Code is actively working.",
                     toggle_desc_frame,
@@ -330,10 +330,8 @@ impl SettingsWindow {
                 );
                 let _: () = msg_send![tab1_view, addSubview: toggle_desc];
 
-                let checkbox_frame = NSRect::new(
-                    NSPoint::new(20.0, 75.0),
-                    NSSize::new(200.0, 24.0),
-                );
+                let checkbox_frame =
+                    NSRect::new(NSPoint::new(20.0, 75.0), NSSize::new(200.0, 24.0));
                 let checkbox: Id = msg_send![class!(NSButton), alloc];
                 let checkbox: Id = msg_send![checkbox, initWithFrame: checkbox_frame];
                 let _: () = msg_send![checkbox, setButtonType: 3i64]; // NSButtonTypeSwitch
@@ -364,20 +362,16 @@ impl SettingsWindow {
                 ];
 
                 // Language selector - at top of tab
-                let lang_label_frame = NSRect::new(
-                    NSPoint::new(20.0, 220.0),
-                    NSSize::new(150.0, 20.0),
-                );
+                let lang_label_frame =
+                    NSRect::new(NSPoint::new(20.0, 220.0), NSSize::new(150.0, 20.0));
                 let lang_label =
                     create_label("Language", lang_label_frame, title_font, title_color);
                 let _: () = msg_send![tab2_view, addSubview: lang_label];
 
-                let popup_frame = NSRect::new(
-                    NSPoint::new(20.0, 190.0),
-                    NSSize::new(200.0, 26.0),
-                );
+                let popup_frame = NSRect::new(NSPoint::new(20.0, 190.0), NSSize::new(200.0, 26.0));
                 let popup: Id = msg_send![class!(NSPopUpButton), alloc];
-                let popup: Id = msg_send![popup, initWithFrame: popup_frame pullsDown: false as BOOL];
+                let popup: Id =
+                    msg_send![popup, initWithFrame: popup_frame pullsDown: false as BOOL];
 
                 let languages = AppSettings::supported_languages();
                 let mut selected_index: i64 = 0;
@@ -393,18 +387,18 @@ impl SettingsWindow {
                 let _: () = msg_send![tab2_view, addSubview: popup];
 
                 // Vocabulary words
-                let vocab_label_frame = NSRect::new(
-                    NSPoint::new(20.0, 150.0),
-                    NSSize::new(300.0, 20.0),
+                let vocab_label_frame =
+                    NSRect::new(NSPoint::new(20.0, 150.0), NSSize::new(300.0, 20.0));
+                let vocab_label = create_label(
+                    "Vocabulary Words",
+                    vocab_label_frame,
+                    title_font,
+                    title_color,
                 );
-                let vocab_label =
-                    create_label("Vocabulary Words", vocab_label_frame, title_font, title_color);
                 let _: () = msg_send![tab2_view, addSubview: vocab_label];
 
-                let vocab_desc_frame = NSRect::new(
-                    NSPoint::new(20.0, 125.0),
-                    NSSize::new(380.0, 20.0),
-                );
+                let vocab_desc_frame =
+                    NSRect::new(NSPoint::new(20.0, 125.0), NSSize::new(380.0, 20.0));
                 let vocab_desc = create_label(
                     "One word per line. These help with transcription accuracy.",
                     vocab_desc_frame,
@@ -414,10 +408,8 @@ impl SettingsWindow {
                 let _: () = msg_send![tab2_view, addSubview: vocab_desc];
 
                 // Vocabulary text view in scroll view - taller to show more words
-                let scroll_frame = NSRect::new(
-                    NSPoint::new(20.0, 15.0),
-                    NSSize::new(width - 100.0, 100.0),
-                );
+                let scroll_frame =
+                    NSRect::new(NSPoint::new(20.0, 15.0), NSSize::new(width - 100.0, 100.0));
                 let scroll_view: Id = msg_send![class!(NSScrollView), alloc];
                 let scroll_view: Id = msg_send![scroll_view, initWithFrame: scroll_frame];
                 let _: () = msg_send![scroll_view, setBorderType: 3i64]; // NSBezelBorder
@@ -429,7 +421,8 @@ impl SettingsWindow {
                 );
                 let text_view: Id = msg_send![class!(NSTextView), alloc];
                 let text_view: Id = msg_send![text_view, initWithFrame: text_view_frame];
-                let _: () = msg_send![text_view, setMinSize: NSSize::new(0.0, scroll_frame.size.height)];
+                let _: () =
+                    msg_send![text_view, setMinSize: NSSize::new(0.0, scroll_frame.size.height)];
                 let _: () = msg_send![text_view, setMaxSize: NSSize::new(f64::MAX as CGFloat, f64::MAX as CGFloat)];
                 let _: () = msg_send![text_view, setVerticallyResizable: true as BOOL];
                 let _: () = msg_send![text_view, setHorizontallyResizable: false as BOOL];
@@ -448,10 +441,8 @@ impl SettingsWindow {
                 let _: () = msg_send![content_view, addSubview: tab_view];
 
                 // Buttons
-                let cancel_frame = NSRect::new(
-                    NSPoint::new(width - 200.0, 15.0),
-                    NSSize::new(80.0, 32.0),
-                );
+                let cancel_frame =
+                    NSRect::new(NSPoint::new(width - 200.0, 15.0), NSSize::new(80.0, 32.0));
                 let cancel_btn: Id = msg_send![class!(NSButton), alloc];
                 let cancel_btn: Id = msg_send![cancel_btn, initWithFrame: cancel_frame];
                 let _: () = msg_send![cancel_btn, setBezelStyle: 1i64];
@@ -461,10 +452,8 @@ impl SettingsWindow {
                 let _: () = msg_send![cancel_btn, setAction: sel!(buttonPressed:)];
                 let _: () = msg_send![content_view, addSubview: cancel_btn];
 
-                let save_frame = NSRect::new(
-                    NSPoint::new(width - 105.0, 15.0),
-                    NSSize::new(80.0, 32.0),
-                );
+                let save_frame =
+                    NSRect::new(NSPoint::new(width - 105.0, 15.0), NSSize::new(80.0, 32.0));
                 let save_btn: Id = msg_send![class!(NSButton), alloc];
                 let save_btn: Id = msg_send![save_btn, initWithFrame: save_frame];
                 let _: () = msg_send![save_btn, setBezelStyle: 1i64];
@@ -487,7 +476,8 @@ impl SettingsWindow {
                     SendPtr(text_view as *mut c_void),
                     previous_policy,
                 )
-            });
+            },
+        );
 
         Self {
             state,

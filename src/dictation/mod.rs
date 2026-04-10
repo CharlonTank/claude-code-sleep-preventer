@@ -5,13 +5,13 @@ mod overlay;
 mod text_injection;
 mod transcription;
 
-pub use onboarding::run_onboarding_if_needed;
 use crate::logging;
 use audio::{
     check_microphone_permission, request_microphone_permission_sync, AudioRecorder,
     MicrophonePermission,
 };
 use globe_key::{GlobeKeyEvent, GlobeKeyManager};
+pub use onboarding::run_onboarding_if_needed;
 use overlay::{OverlayMode, RecordingOverlay};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
@@ -62,12 +62,15 @@ impl DictationManager {
     pub fn start(&mut self) -> Result<(), String> {
         if !self.transcriber.is_available() {
             return Err(
-                "Whisper model not found. Use 'Setup Dictation...' from the menu to download it.".to_string(),
+                "Whisper model not found. Use 'Setup Dictation...' from the menu to download it."
+                    .to_string(),
             );
         }
 
         if !globe_key::check_input_monitoring_permission() {
-            logging::log("[dictation] Input Monitoring not granted; skipping globe key listener start");
+            logging::log(
+                "[dictation] Input Monitoring not granted; skipping globe key listener start",
+            );
             return Ok(());
         }
 
@@ -82,7 +85,10 @@ impl DictationManager {
             };
         }
 
-        logging::log(&format!("[dictation] Microphone permission: {:?}", mic_permission));
+        logging::log(&format!(
+            "[dictation] Microphone permission: {:?}",
+            mic_permission
+        ));
         if mic_permission == MicrophonePermission::Denied {
             logging::log("[dictation] Microphone permission denied");
         }

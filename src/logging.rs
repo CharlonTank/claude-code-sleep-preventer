@@ -17,7 +17,10 @@ pub fn init() {
         *LOG_FILE.lock().unwrap() = Some(log_path.clone());
 
         // Write startup message
-        log_internal(&format!("=== CCSP {} started ===", env!("CARGO_PKG_VERSION")));
+        log_internal(&format!(
+            "=== CCSP {} started ===",
+            env!("CARGO_PKG_VERSION")
+        ));
         log_internal(&format!("Executable: {:?}", std::env::current_exe().ok()));
     }
 }
@@ -31,11 +34,7 @@ pub fn log(message: &str) {
 fn log_internal(message: &str) {
     let log_path = LOG_FILE.lock().unwrap();
     if let Some(path) = log_path.as_ref() {
-        if let Ok(mut file) = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-        {
+        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
             let timestamp = SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .map(|d| d.as_secs())

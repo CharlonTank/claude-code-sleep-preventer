@@ -1,5 +1,5 @@
-use objc::{class, msg_send, sel, sel_impl};
 use objc::runtime::NO;
+use objc::{class, msg_send, sel, sel_impl};
 
 use crate::objc_utils::{nsstring, CGFloat, Id, NSPoint, NSRect, NSSize};
 

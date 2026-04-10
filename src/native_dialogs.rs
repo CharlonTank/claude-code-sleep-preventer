@@ -3,7 +3,7 @@
 
 use dispatch::Queue;
 use objc::declare::ClassDecl;
-use objc::runtime::{BOOL, Class, Object, Sel};
+use objc::runtime::{Class, Object, Sel, BOOL};
 use objc::{class, msg_send, sel, sel_impl};
 use std::ffi::c_void;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -105,7 +105,10 @@ unsafe fn build_permission_row(
     let button_y = (size.height - button_height) / 2.0;
     let label_width = size.width - button_width - 40.0;
 
-    let title_frame = NSRect::new(NSPoint::new(16.0, size.height - 32.0), NSSize::new(label_width, 18.0));
+    let title_frame = NSRect::new(
+        NSPoint::new(16.0, size.height - 32.0),
+        NSSize::new(label_width, 18.0),
+    );
     let desc_frame = NSRect::new(NSPoint::new(16.0, 12.0), NSSize::new(label_width, 26.0));
     let title_label = create_label(title, title_frame, title_font, title_color);
     let desc_label = create_label(description, desc_frame, desc_font, desc_color);
@@ -283,7 +286,6 @@ impl DialogState {
     fn take_action(&self) -> Option<SetupAction> {
         self.action.lock().unwrap().take()
     }
-
 }
 
 struct PermissionsState {
@@ -592,8 +594,7 @@ impl SetupWindow {
             let background = ns_color(0.18, 0.18, 0.18, 1.0);
             let _: () = msg_send![window, setBackgroundColor: background];
 
-            let appearance: Id =
-                msg_send![class!(NSAppearance), appearanceNamed: nsstring("NSAppearanceNameDarkAqua")];
+            let appearance: Id = msg_send![class!(NSAppearance), appearanceNamed: nsstring("NSAppearanceNameDarkAqua")];
             let _: () = msg_send![window, setAppearance: appearance];
 
             let content_view: Id = msg_send![window, contentView];
@@ -604,8 +605,10 @@ impl SetupWindow {
             let title_color = ns_color(0.95, 0.95, 0.95, 1.0);
             let body_color = ns_color(0.70, 0.70, 0.70, 1.0);
 
-            let progress_frame =
-                NSRect::new(NSPoint::new(24.0, height - 18.0), NSSize::new(width - 48.0, 6.0));
+            let progress_frame = NSRect::new(
+                NSPoint::new(24.0, height - 18.0),
+                NSSize::new(width - 48.0, 6.0),
+            );
             let progress: Id = msg_send![class!(NSProgressIndicator), alloc];
             let progress: Id = msg_send![progress, initWithFrame: progress_frame];
             let _: () = msg_send![progress, setIndeterminate: false as BOOL];
@@ -615,14 +618,14 @@ impl SetupWindow {
             let _: () = msg_send![progress, setStyle: 0i64];
             let _: () = msg_send![progress, setHidden: true as BOOL];
 
-            let title_frame =
-                NSRect::new(NSPoint::new(24.0, height - 64.0), NSSize::new(width - 48.0, 28.0));
+            let title_frame = NSRect::new(
+                NSPoint::new(24.0, height - 64.0),
+                NSSize::new(width - 48.0, 28.0),
+            );
             let title_label = create_label(&title, title_frame, title_font, title_color);
 
-            let message_frame = NSRect::new(
-                NSPoint::new(24.0, 220.0),
-                NSSize::new(width - 48.0, 150.0),
-            );
+            let message_frame =
+                NSRect::new(NSPoint::new(24.0, 220.0), NSSize::new(width - 48.0, 150.0));
             let label = create_label(&message, message_frame, body_font, body_color);
 
             let secondary_frame =
@@ -734,9 +737,7 @@ impl SetupWindow {
     pub fn wait_for_action(&self) -> SetupAction {
         self.state.clear();
         self.run_modal();
-        self.state
-            .take_action()
-            .unwrap_or(SetupAction::Secondary)
+        self.state.take_action().unwrap_or(SetupAction::Secondary)
     }
 
     pub fn close(&self) {
@@ -878,8 +879,7 @@ impl PermissionsWindow {
             let background = ns_color(0.18, 0.18, 0.18, 1.0);
             let _: () = msg_send![window, setBackgroundColor: background];
 
-            let appearance: Id =
-                msg_send![class!(NSAppearance), appearanceNamed: nsstring("NSAppearanceNameDarkAqua")];
+            let appearance: Id = msg_send![class!(NSAppearance), appearanceNamed: nsstring("NSAppearanceNameDarkAqua")];
             let _: () = msg_send![window, setAppearance: appearance];
 
             let content_view: Id = msg_send![window, contentView];
@@ -891,7 +891,8 @@ impl PermissionsWindow {
 
             let title_font: Id = msg_send![class!(NSFont), boldSystemFontOfSize: 22.0 as CGFloat];
             let subtitle_font: Id = msg_send![class!(NSFont), systemFontOfSize: 13.0 as CGFloat];
-            let row_title_font: Id = msg_send![class!(NSFont), boldSystemFontOfSize: 14.0 as CGFloat];
+            let row_title_font: Id =
+                msg_send![class!(NSFont), boldSystemFontOfSize: 14.0 as CGFloat];
             let row_desc_font: Id = msg_send![class!(NSFont), systemFontOfSize: 12.0 as CGFloat];
             let button_font: Id = msg_send![class!(NSFont), systemFontOfSize: 12.0 as CGFloat];
 
@@ -900,8 +901,10 @@ impl PermissionsWindow {
             let desc_color = ns_color(0.60, 0.60, 0.60, 1.0);
             let row_color = ns_color(0.23, 0.23, 0.23, 1.0);
 
-            let progress_frame =
-                NSRect::new(NSPoint::new(24.0, height - 18.0), NSSize::new(width - 48.0, 6.0));
+            let progress_frame = NSRect::new(
+                NSPoint::new(24.0, height - 18.0),
+                NSSize::new(width - 48.0, 6.0),
+            );
             let progress: Id = msg_send![class!(NSProgressIndicator), alloc];
             let progress: Id = msg_send![progress, initWithFrame: progress_frame];
             let _: () = msg_send![progress, setIndeterminate: false as BOOL];
@@ -910,13 +913,18 @@ impl PermissionsWindow {
             let _: () = msg_send![progress, setDoubleValue: 0.0];
             let _: () = msg_send![progress, setStyle: 0i64];
 
-            let title_frame =
-                NSRect::new(NSPoint::new(24.0, height - 64.0), NSSize::new(width - 48.0, 28.0));
+            let title_frame = NSRect::new(
+                NSPoint::new(24.0, height - 64.0),
+                NSSize::new(width - 48.0, 28.0),
+            );
             let title_label = create_label(&title, title_frame, title_font, title_color);
 
-            let subtitle_frame =
-                NSRect::new(NSPoint::new(24.0, height - 110.0), NSSize::new(width - 48.0, 40.0));
-            let subtitle_label = create_label(&message, subtitle_frame, subtitle_font, subtitle_color);
+            let subtitle_frame = NSRect::new(
+                NSPoint::new(24.0, height - 110.0),
+                NSSize::new(width - 48.0, 40.0),
+            );
+            let subtitle_label =
+                create_label(&message, subtitle_frame, subtitle_font, subtitle_color);
 
             let row_width = width - 48.0;
             let row_height: CGFloat = 72.0;
@@ -1096,7 +1104,9 @@ impl PermissionsWindow {
             let app: Id = msg_send![class!(NSApplication), sharedApplication];
             let _: () = msg_send![app, setActivationPolicy: previous_policy];
 
-            drop(Arc::from_raw(state_ptr.into_ptr() as *const PermissionsState));
+            drop(Arc::from_raw(
+                state_ptr.into_ptr() as *const PermissionsState
+            ));
         });
     }
 }

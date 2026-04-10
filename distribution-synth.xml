@@ -16,9 +16,9 @@
     <choice id="com.charlontank.claude-sleep-preventer-cli" visible="false">
         <pkg-ref id="com.charlontank.claude-sleep-preventer-cli"/>
     </choice>
-    <pkg-ref id="com.charlontank.claude-sleep-preventer-cli" version="2.1.4" onConclusion="none">ClaudeSleepPreventer-cli.pkg</pkg-ref>
+    <pkg-ref id="com.charlontank.claude-sleep-preventer-cli" version="3.0.3" onConclusion="none">ClaudeSleepPreventer-cli.pkg</pkg-ref>
     <choice id="com.charlontank.claude-sleep-preventer" visible="false">
         <pkg-ref id="com.charlontank.claude-sleep-preventer"/>
     </choice>
-    <pkg-ref id="com.charlontank.claude-sleep-preventer" version="2.1.4" onConclusion="none">ClaudeSleepPreventer-app.pkg</pkg-ref>
+    <pkg-ref id="com.charlontank.claude-sleep-preventer" version="3.0.3" onConclusion="none">ClaudeSleepPreventer-app.pkg</pkg-ref>
 </installer-gui-script>

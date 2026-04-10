@@ -58,14 +58,14 @@ This removes:
 To publish a new version, prefer:
 
 1. `cargo xtask release X.Y.Z` (bumps `Cargo.toml`, `Info.plist`, `README.md`, builds signed DMG, notarizes)
-2. Add `--upload` to also push the DMG to GitHub release
+2. Add `--upload` to also push the DMG and `appcast.xml` to GitHub release
 3. Commit and push changes
 
 **IMPORTANT**: The keychain profile is `"notary"` (NOT "notarytool").
 
 **IMPORTANT**: Update the version number in README.md download links when releasing a new version.
 
-**IMPORTANT**: The menu bar app checks `GitHub Releases -> latest` for in-app updates and downloads the `.dmg` asset attached to the latest release. Keep semver tags in the `vX.Y.Z` format and publish the DMG asset on every release.
+**IMPORTANT**: The menu bar app uses Sparkle with `https://github.com/CharlonTank/claude-code-sleep-preventer/releases/latest/download/appcast.xml` as the feed URL. Keep semver tags in the `vX.Y.Z` format and publish both the DMG and `appcast.xml` asset on every release.
 
 ## macOS Permissions Notes
 

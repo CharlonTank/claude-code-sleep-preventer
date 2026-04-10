@@ -7,7 +7,7 @@
 
 <br>
 
-[![Download DMG](https://img.shields.io/badge/Download-DMG%20Installer-blue?style=for-the-badge&logo=apple)](https://github.com/CharlonTank/claude-code-sleep-preventer/releases/latest/download/ClaudeSleepPreventer-3.0.2.dmg)
+[![Download DMG](https://img.shields.io/badge/Download-DMG%20Installer-blue?style=for-the-badge&logo=apple)](https://github.com/CharlonTank/claude-code-sleep-preventer/releases/latest/download/ClaudeSleepPreventer-3.0.3.dmg)
 
 <br>
 
@@ -45,12 +45,12 @@ Install this tool. Now your Mac stays awake while Claude works, even with the li
 
 ### 🍎 Download DMG (Easiest)
 
-1. [Download the latest DMG](https://github.com/CharlonTank/claude-code-sleep-preventer/releases/latest/download/ClaudeSleepPreventer-3.0.2.dmg)
+1. [Download the latest DMG](https://github.com/CharlonTank/claude-code-sleep-preventer/releases/latest/download/ClaudeSleepPreventer-3.0.3.dmg)
 2. Drag `ClaudeSleepPreventer.app` to Applications
 3. Launch the app - it will auto-configure on first run
 4. Restart Claude Code
 
-The menu bar app can also check GitHub releases for updates and prompt users to download the latest DMG.
+The menu bar app uses Sparkle for in-app updates and can download + install new signed releases directly.
 
 ### 🍺 Homebrew
 
@@ -107,7 +107,7 @@ Run `claude-sleep-preventer cleanup` or the tool auto-detects idle sessions afte
 Yes! Mac stays awake until ALL instances finish.
 
 **How do app updates work?**
-Open the menu bar app and use `Check for Updates...`, or wait for the automatic background check. When a new version is available, the app opens the latest DMG download from GitHub Releases.
+The menu bar app uses Sparkle. Use `Check for Updates...` from the menu bar app, or let Sparkle check automatically in the background. New signed releases are installed through Sparkle instead of just opening a DMG download.
 
 ---
 

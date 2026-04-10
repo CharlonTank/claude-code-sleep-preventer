@@ -1,13 +1,12 @@
 mod ui;
 
-use objc::{class, msg_send, sel, sel_impl};
 use objc::runtime::{NO, YES};
+use objc::{class, msg_send, sel, sel_impl};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::objc_utils::{
     CGFloat, Id, NSPoint, NSRect, NSSize, NIL, NS_BACKING_STORE_BUFFERED,
-    NS_WINDOW_COLLECTION_BEHAVIOR_CAN_JOIN_ALL_SPACES,
-    NS_WINDOW_COLLECTION_BEHAVIOR_IGNORES_CYCLE,
+    NS_WINDOW_COLLECTION_BEHAVIOR_CAN_JOIN_ALL_SPACES, NS_WINDOW_COLLECTION_BEHAVIOR_IGNORES_CYCLE,
     NS_WINDOW_COLLECTION_BEHAVIOR_STATIONARY, NS_WINDOW_STYLE_MASK_BORDERLESS,
 };
 
@@ -32,9 +31,7 @@ pub struct PopoverWindow {
 
 impl PopoverWindow {
     pub fn new() -> Self {
-        Self {
-            window: None,
-        }
+        Self { window: None }
     }
 
     pub fn is_visible(&self) -> bool {
@@ -42,7 +39,10 @@ impl PopoverWindow {
     }
 
     pub fn show(&mut self, icon_rect: (f64, f64, f64, f64), state: &PopoverState) {
-        crate::logging::log(&format!("[popover] show() called, icon_rect={:?}", icon_rect));
+        crate::logging::log(&format!(
+            "[popover] show() called, icon_rect={:?}",
+            icon_rect
+        ));
         if self.window.is_some() {
             crate::logging::log("[popover] window already exists, returning");
             return;
@@ -132,7 +132,8 @@ impl PopoverWindow {
         } else {
             "Sleep Prevention (Off)"
         };
-        let toggle = ui::create_toggle_switch(state.manual_enabled, toggle_text, 20.0, y, 240.0, 26.0);
+        let toggle =
+            ui::create_toggle_switch(state.manual_enabled, toggle_text, 20.0, y, 240.0, 26.0);
         let _: () = msg_send![content_view, addSubview: toggle];
         y -= 35.0;
 
@@ -168,7 +169,8 @@ impl PopoverWindow {
 
         // Inactive instances header
         if !state.inactive.is_empty() {
-            let inactive_header = ui::create_label("Inactive Instances", 20.0, y, 240.0, 18.0, false);
+            let inactive_header =
+                ui::create_label("Inactive Instances", 20.0, y, 240.0, 18.0, false);
             let _: () = msg_send![content_view, addSubview: inactive_header];
             y -= 22.0;
 
