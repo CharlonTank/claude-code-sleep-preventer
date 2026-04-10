@@ -24,6 +24,7 @@ use io_kit_sys::*;
 use mach2::port::MACH_PORT_NULL;
 use objc::{class, msg_send, sel, sel_impl};
 use serde_json::json;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Write;
 use std::os::unix::io::AsRawFd;
@@ -50,13 +51,21 @@ static CURRENT_PID_INDEX: AtomicUsize = AtomicUsize::new(0);
 static CURRENT_INACTIVE_INDEX: AtomicUsize = AtomicUsize::new(0);
 static MANUAL_SLEEP_PREVENTION: AtomicBool = AtomicBool::new(true);
 
-const PIDS_DIR: &str = "/tmp/claude_working_pids";
+const PIDS_DIR: &str = "/tmp/agents_working_pids";
+const LEGACY_PIDS_DIR: &str = "/tmp/claude_working_pids";
 const IDLE_TIMEOUT_SECS: u64 = 30;
 const IDLE_CPU_THRESHOLD: f32 = 0.5;
+const APP_BINARY_PATH: &str = "/Applications/AgentsSleepPreventer.app/Contents/MacOS/asp";
+const OWNED_HOOK_MARKERS: [&str; 4] = [
+    "AgentsSleepPreventer.app/Contents/MacOS/asp",
+    "/usr/local/bin/asp",
+    "/usr/local/bin/agents-sleep-preventer",
+    "claude-sleep-preventer",
+];
 
 #[derive(Parser)]
-#[command(name = "claude-sleep-preventer")]
-#[command(about = "Keep your Mac awake while Claude Code is working")]
+#[command(name = "asp")]
+#[command(about = "Keep your Mac awake while coding agents are working")]
 #[command(version)]
 struct Cli {
     #[command(subcommand)]
@@ -65,15 +74,15 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Register current Claude process and disable sleep
+    /// Register current agent process and disable sleep
     Start,
-    /// Unregister current Claude process and re-enable sleep if no others
+    /// Unregister current agent process and re-enable sleep if no others
     Stop,
     /// Show current status
     Status,
     /// List active/inactive instances as JSON
     List,
-    /// Focus a Claude instance by PID
+    /// Focus an agent instance by PID
     Focus { pid: u32 },
     /// Clean up stale PIDs (interrupted sessions)
     Cleanup,
@@ -90,7 +99,7 @@ enum Commands {
     Reset,
     /// Check thermal state
     Thermal,
-    /// Install hooks and configure Claude Code
+    /// Install hooks and configure supported coding agents
     Install {
         /// Skip confirmation prompt
         #[arg(short, long)]
@@ -101,7 +110,7 @@ enum Commands {
         /// Keep Whisper model data (~1.5 GB)
         #[arg(short = 'k', long)]
         keep_model: bool,
-        /// Keep Claude Code hooks
+        /// Keep coding agent hooks
         #[arg(long)]
         keep_hooks: bool,
         /// Keep app data and logs
@@ -142,41 +151,127 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn find_claude_ancestor() -> Option<u32> {
-    let mut current_pid = std::process::id();
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentKind {
+    Claude,
+    Codex,
+}
 
-    for _ in 0..10 {
-        let output = Command::new("ps")
-            .args(["-p", &current_pid.to_string(), "-o", "ppid=,comm="])
-            .output()
-            .ok()?;
+#[derive(Debug, Clone)]
+struct ProcessInfo {
+    pid: u32,
+    ppid: u32,
+    comm: String,
+    args: String,
+}
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let line = stdout.trim();
+fn load_process_table() -> Vec<ProcessInfo> {
+    Command::new("ps")
+        .args(["-eo", "pid=,ppid=,comm=,args="])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.lines().filter_map(parse_process_line).collect())
+        .unwrap_or_default()
+}
 
-        if line.is_empty() {
+fn parse_process_line(line: &str) -> Option<ProcessInfo> {
+    let mut parts = line.split_whitespace();
+    let pid = parts.next()?.parse().ok()?;
+    let ppid = parts.next()?.parse().ok()?;
+    let comm = parts.next()?.to_string();
+    let args = parts.collect::<Vec<_>>().join(" ");
+    Some(ProcessInfo {
+        pid,
+        ppid,
+        comm,
+        args,
+    })
+}
+
+fn executable_basename(token: &str) -> &str {
+    token.rsplit('/').next().unwrap_or(token)
+}
+
+fn executable_name_is(token: &str, expected: &str) -> bool {
+    let basename = executable_basename(token);
+    basename == expected || basename == format!("{}.exe", expected)
+}
+
+fn process_tokens(process: &ProcessInfo) -> Vec<&str> {
+    process.args.split_whitespace().collect()
+}
+
+fn codex_command_index(tokens: &[&str]) -> Option<usize> {
+    tokens
+        .iter()
+        .position(|token| executable_name_is(token, "codex"))
+}
+
+fn is_codex_app_server(tokens: &[&str]) -> bool {
+    codex_command_index(tokens)
+        .and_then(|idx| tokens.get(idx + 1))
+        .map(|arg| *arg == "app-server")
+        .unwrap_or(false)
+}
+
+fn is_codex_wrapper_process(process: &ProcessInfo) -> bool {
+    let tokens = process_tokens(process);
+    tokens
+        .first()
+        .map(|arg0| executable_name_is(arg0, "node"))
+        .unwrap_or(false)
+        && tokens
+            .get(1)
+            .map(|arg1| executable_name_is(arg1, "codex"))
+            .unwrap_or(false)
+        && !is_codex_app_server(&tokens)
+}
+
+fn is_codex_native_process(process: &ProcessInfo) -> bool {
+    let tokens = process_tokens(process);
+    let arg0 = tokens.first().copied().unwrap_or(&process.comm);
+    (executable_name_is(arg0, "codex") || executable_name_is(&process.comm, "codex"))
+        && !is_codex_app_server(&tokens)
+}
+
+fn classify_agent_process(process: &ProcessInfo) -> Option<AgentKind> {
+    let tokens = process_tokens(process);
+    let arg0 = tokens.first().copied().unwrap_or(&process.comm);
+
+    if executable_name_is(arg0, "claude") || executable_name_is(&process.comm, "claude") {
+        return Some(AgentKind::Claude);
+    }
+
+    if is_codex_native_process(process) || is_codex_wrapper_process(process) {
+        return Some(AgentKind::Codex);
+    }
+
+    None
+}
+
+fn find_agent_ancestor() -> Option<u32> {
+    let processes = load_process_table();
+    let by_pid: HashMap<u32, ProcessInfo> = processes
+        .into_iter()
+        .map(|process| (process.pid, process))
+        .collect();
+    let this_pid = std::process::id();
+    let mut current_pid = this_pid;
+
+    for _ in 0..20 {
+        let Some(process) = by_pid.get(&current_pid) else {
             break;
+        };
+
+        if current_pid != this_pid && classify_agent_process(process).is_some() {
+            return Some(current_pid);
         }
 
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() >= 2 {
-            let ppid: u32 = parts[0].parse().ok()?;
-
-            let parent_output = Command::new("ps")
-                .args(["-p", &ppid.to_string(), "-o", "comm="])
-                .output()
-                .ok()?;
-            let parent_comm = String::from_utf8_lossy(&parent_output.stdout)
-                .trim()
-                .to_string();
-
-            if parent_comm == "claude" {
-                return Some(ppid);
-            }
-            current_pid = ppid;
-        } else {
+        if process.ppid == 0 || process.ppid == current_pid {
             break;
         }
+        current_pid = process.ppid;
     }
 
     Some(std::os::unix::process::parent_id())
@@ -363,8 +458,8 @@ fn format_process_location(pid: u32) -> String {
 fn cmd_start() -> Result<()> {
     ensure_pids_dir()?;
 
-    let claude_pid = find_claude_ancestor().unwrap_or(std::process::id());
-    let pid_file = get_pid_file(claude_pid);
+    let agent_pid = find_agent_ancestor().unwrap_or(std::process::id());
+    let pid_file = get_pid_file(agent_pid);
 
     fs::write(&pid_file, "working").context("Failed to write PID file")?;
 
@@ -372,48 +467,51 @@ fn cmd_start() -> Result<()> {
 }
 
 fn cmd_stop() -> Result<()> {
-    let claude_pid = find_claude_ancestor().unwrap_or(std::process::id());
-    let pid_file = get_pid_file(claude_pid);
+    let agent_pid = find_agent_ancestor().unwrap_or(std::process::id());
+    let pid_file = get_pid_file(agent_pid);
 
     let _ = fs::remove_file(&pid_file);
 
     Ok(())
 }
 
-fn count_claude_processes() -> usize {
-    Command::new("ps")
-        .args(["-eo", "comm"])
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.lines().filter(|l| l.trim() == "claude").count())
-        .unwrap_or(0)
-}
-
-fn get_all_claude_pids() -> Vec<u32> {
-    Command::new("ps")
-        .args(["-eo", "pid,comm"])
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| {
-            s.lines()
-                .filter_map(|l| {
-                    let parts: Vec<&str> = l.trim().split_whitespace().collect();
-                    if parts.len() >= 2 && parts[1] == "claude" {
-                        parts[0].parse().ok()
-                    } else {
-                        None
-                    }
-                })
-                .collect()
+fn get_all_agent_processes() -> Vec<ProcessInfo> {
+    let processes = load_process_table();
+    let codex_native_parents: HashSet<u32> = processes
+        .iter()
+        .filter(|process| is_codex_native_process(process))
+        .map(|process| process.ppid)
+        .collect();
+    let mut seen_pids = HashSet::new();
+    let mut agents = processes
+        .into_iter()
+        .filter(|process| match classify_agent_process(process) {
+            Some(AgentKind::Claude) => true,
+            Some(AgentKind::Codex) => {
+                !(is_codex_wrapper_process(process) && codex_native_parents.contains(&process.pid))
+            }
+            None => false,
         })
-        .unwrap_or_default()
+        .filter(|process| seen_pids.insert(process.pid))
+        .collect::<Vec<_>>();
+    agents.sort_by_key(|process| process.pid);
+    agents
 }
 
-fn get_inactive_claude_pids() -> Vec<u32> {
-    let all_pids = get_all_claude_pids();
-    let active_pids: Vec<u32> = get_instance_items()
+fn count_agent_processes() -> usize {
+    get_all_agent_processes().len()
+}
+
+fn get_all_agent_pids() -> Vec<u32> {
+    get_all_agent_processes()
+        .into_iter()
+        .map(|process| process.pid)
+        .collect()
+}
+
+fn get_inactive_agent_pids() -> Vec<u32> {
+    let all_pids = get_all_agent_pids();
+    let active_pids: HashSet<u32> = get_instance_items()
         .iter()
         .map(|(pid, _, _, _)| *pid)
         .collect();
@@ -427,12 +525,12 @@ fn cmd_status() -> Result<()> {
     let sleep_disabled = is_sleep_disabled();
     let active_count = count_active_pids();
     let thermal_warning = check_thermal_warning();
-    let claude_count = count_claude_processes();
+    let agent_count = count_agent_processes();
 
-    println!("Claude Code Sleep Preventer v{}", env!("CARGO_PKG_VERSION"));
+    println!("Agents Sleep Preventer v{}", env!("CARGO_PKG_VERSION"));
     println!("==========================================");
     println!("Working instances: {}", active_count);
-    println!("Claude processes: {}", claude_count);
+    println!("Agent processes: {}", agent_count);
     println!(
         "Sleep disabled: {}",
         if sleep_disabled { "Yes" } else { "No" }
@@ -475,7 +573,7 @@ fn cmd_list() -> Result<()> {
             })
         })
         .collect::<Vec<_>>();
-    let inactive = get_inactive_claude_pids();
+    let inactive = get_inactive_agent_pids();
     let sleep_disabled = is_sleep_disabled();
     let payload = json!({
         "active": active,
@@ -744,33 +842,376 @@ fn create_tray_title(count: usize, manual_enabled: bool) -> String {
     }
 }
 
-fn is_installed() -> bool {
-    let home = dirs::home_dir().unwrap_or_default();
+fn resolve_user_home() -> Result<PathBuf> {
+    if let Ok(sudo_user) = std::env::var("SUDO_USER") {
+        let sudo_user = sudo_user.trim();
+        if !sudo_user.is_empty() && sudo_user != "root" {
+            let user_record = format!("/Users/{}", sudo_user);
+            if let Ok(output) = Command::new("dscl")
+                .args([".", "-read", &user_record, "NFSHomeDirectory"])
+                .output()
+            {
+                if output.status.success() {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    for line in stdout.lines() {
+                        if let Some(home) = line.trim().strip_prefix("NFSHomeDirectory:") {
+                            let home = home.trim();
+                            if !home.is_empty() {
+                                return Ok(PathBuf::from(home));
+                            }
+                        }
+                    }
+                }
+            }
+            return Ok(PathBuf::from(user_record));
+        }
+    }
+
+    dirs::home_dir().context("Could not find home directory")
+}
+
+#[cfg(unix)]
+fn fix_user_ownership(path: &Path) {
+    let Ok(sudo_user) = std::env::var("SUDO_USER") else {
+        return;
+    };
+    let sudo_user = sudo_user.trim();
+    if sudo_user.is_empty() || sudo_user == "root" {
+        return;
+    }
+    let Some(path) = path.to_str() else {
+        return;
+    };
+    let _ = Command::new("chown").args(["-R", sudo_user, path]).status();
+}
+
+fn toml_section_name(line: &str) -> Option<&str> {
+    let code = line.split('#').next().unwrap_or("").trim();
+    if !code.starts_with('[') || !code.ends_with(']') {
+        return None;
+    }
+    Some(code.trim_matches(&['[', ']'][..]).trim())
+}
+
+fn set_toml_feature_true(content: &str, feature: &str) -> String {
+    let mut lines = content.lines().map(ToOwned::to_owned).collect::<Vec<_>>();
+    let mut features_start = None;
+    let mut features_end = lines.len();
+
+    for (idx, line) in lines.iter().enumerate() {
+        let Some(section) = toml_section_name(line) else {
+            continue;
+        };
+        if section == "features" {
+            features_start = Some(idx);
+            features_end = lines.len();
+        } else if features_start.is_some() {
+            features_end = idx;
+            break;
+        }
+    }
+
+    if let Some(start) = features_start {
+        for line in lines.iter_mut().take(features_end).skip(start + 1) {
+            let code = line.split('#').next().unwrap_or("").trim_start();
+            if let Some(rest) = code.strip_prefix(feature) {
+                if rest.trim_start().starts_with('=') {
+                    let indent = line
+                        .chars()
+                        .take_while(|ch| ch.is_whitespace())
+                        .collect::<String>();
+                    *line = format!("{}{} = true", indent, feature);
+                    return format!("{}\n", lines.join("\n"));
+                }
+            }
+        }
+        lines.insert(features_end, format!("{} = true", feature));
+    } else {
+        if !lines.is_empty()
+            && lines
+                .last()
+                .map(|line| !line.trim().is_empty())
+                .unwrap_or(false)
+        {
+            lines.push(String::new());
+        }
+        lines.push("[features]".to_string());
+        lines.push(format!("{} = true", feature));
+    }
+
+    format!("{}\n", lines.join("\n"))
+}
+
+fn enable_codex_hooks_feature(config_file: &Path) -> Result<()> {
+    let content = fs::read_to_string(config_file).unwrap_or_default();
+    let updated = set_toml_feature_true(&content, "codex_hooks");
+    if updated != content {
+        fs::write(config_file, updated)
+            .with_context(|| format!("Failed to write {}", config_file.display()))?;
+    }
+    Ok(())
+}
+
+fn hook_value_contains_owned_command(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::String(text) => OWNED_HOOK_MARKERS
+            .iter()
+            .any(|marker| text.contains(marker)),
+        serde_json::Value::Array(values) => values.iter().any(hook_value_contains_owned_command),
+        serde_json::Value::Object(map) => map.values().any(hook_value_contains_owned_command),
+        _ => false,
+    }
+}
+
+fn remove_owned_hooks_from_group(group: &mut serde_json::Value) -> bool {
+    let Some(hooks) = group
+        .get_mut("hooks")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return false;
+    };
+
+    let before = hooks.len();
+    hooks.retain(|hook| !hook_value_contains_owned_command(hook));
+    before != hooks.len()
+}
+
+fn remove_owned_hook_groups(hooks: &mut serde_json::Value) -> bool {
+    let Some(events) = hooks.as_object_mut() else {
+        return false;
+    };
+
+    let mut changed = false;
+    for groups in events.values_mut() {
+        let Some(groups) = groups.as_array_mut() else {
+            continue;
+        };
+
+        for group in groups.iter_mut() {
+            if remove_owned_hooks_from_group(group) {
+                changed = true;
+            }
+        }
+
+        let before = groups.len();
+        groups.retain(|group| {
+            group
+                .get("hooks")
+                .and_then(serde_json::Value::as_array)
+                .map(|hooks| !hooks.is_empty())
+                .unwrap_or(true)
+        });
+        changed |= before != groups.len();
+    }
+
+    changed
+}
+
+fn prune_empty_hook_events(hooks: &mut serde_json::Value) {
+    if let Some(events) = hooks.as_object_mut() {
+        events.retain(|_, groups| {
+            groups
+                .as_array()
+                .map(|groups| !groups.is_empty())
+                .unwrap_or(true)
+        });
+    }
+}
+
+fn command_hook_group(command: &str, matcher: Option<&str>) -> serde_json::Value {
+    let mut group = json!({
+        "hooks": [
+            {
+                "type": "command",
+                "command": command,
+                "timeout": 5
+            }
+        ]
+    });
+    if let Some(matcher) = matcher {
+        group["matcher"] = json!(matcher);
+    }
+    group
+}
+
+fn append_codex_hook_group(
+    hooks: &mut serde_json::Map<String, serde_json::Value>,
+    event_name: &str,
+    group: serde_json::Value,
+) {
+    let event = hooks
+        .entry(event_name.to_string())
+        .or_insert_with(|| json!([]));
+    if !event.is_array() {
+        *event = json!([]);
+    }
+    if let Some(groups) = event.as_array_mut() {
+        groups.push(group);
+    }
+}
+
+fn install_codex_hooks(home: &Path, app_binary: &str) -> Result<()> {
+    let codex_dir = home.join(".codex");
+    fs::create_dir_all(&codex_dir)
+        .with_context(|| format!("Failed to create {}", codex_dir.display()))?;
+
+    let config_file = codex_dir.join("config.toml");
+    enable_codex_hooks_feature(&config_file)?;
+
+    let hooks_file = codex_dir.join("hooks.json");
+    let mut hooks_json = if hooks_file.exists() {
+        let content = fs::read_to_string(&hooks_file)
+            .with_context(|| format!("Failed to read {}", hooks_file.display()))?;
+        serde_json::from_str::<serde_json::Value>(&content)
+            .with_context(|| format!("Failed to parse {}", hooks_file.display()))?
+    } else {
+        json!({})
+    };
+
+    if !hooks_json.is_object() {
+        hooks_json = json!({});
+    }
+    if !hooks_json
+        .get("hooks")
+        .map(serde_json::Value::is_object)
+        .unwrap_or(false)
+    {
+        hooks_json["hooks"] = json!({});
+    }
+
+    if let Some(hooks) = hooks_json.get_mut("hooks") {
+        remove_owned_hook_groups(hooks);
+        prune_empty_hook_events(hooks);
+    }
+
+    let start_command =
+        format!("[ -x \"{app_binary}\" ] && \"{app_binary}\" start 2>/dev/null || true");
+    let stop_command =
+        format!("[ -x \"{app_binary}\" ] && \"{app_binary}\" stop 2>/dev/null || true");
+
+    let hooks = hooks_json
+        .get_mut("hooks")
+        .and_then(serde_json::Value::as_object_mut)
+        .context("Failed to prepare Codex hooks object")?;
+    append_codex_hook_group(
+        hooks,
+        "UserPromptSubmit",
+        command_hook_group(&start_command, None),
+    );
+    append_codex_hook_group(
+        hooks,
+        "PreToolUse",
+        command_hook_group(&start_command, Some("*")),
+    );
+    append_codex_hook_group(
+        hooks,
+        "PostToolUse",
+        command_hook_group(&start_command, Some("*")),
+    );
+    append_codex_hook_group(hooks, "Stop", command_hook_group(&stop_command, None));
+
+    fs::write(&hooks_file, serde_json::to_string_pretty(&hooks_json)?)
+        .with_context(|| format!("Failed to write {}", hooks_file.display()))?;
+
+    #[cfg(unix)]
+    fix_user_ownership(&codex_dir);
+
+    println!("  Updated {}", config_file.display());
+    println!("  Updated {}", hooks_file.display());
+
+    Ok(())
+}
+
+fn remove_codex_hooks(home: &Path) -> Result<bool> {
+    let hooks_file = home.join(".codex/hooks.json");
+    if !hooks_file.exists() {
+        return Ok(false);
+    }
+
+    let content = fs::read_to_string(&hooks_file)
+        .with_context(|| format!("Failed to read {}", hooks_file.display()))?;
+    let Ok(mut hooks_json) = serde_json::from_str::<serde_json::Value>(&content) else {
+        eprintln!(
+            "Warning: could not parse {}, leaving it unchanged",
+            hooks_file.display()
+        );
+        return Ok(false);
+    };
+
+    let changed = hooks_json
+        .get_mut("hooks")
+        .map(remove_owned_hook_groups)
+        .unwrap_or(false);
+    if !changed {
+        return Ok(false);
+    }
+
+    if let Some(hooks) = hooks_json.get_mut("hooks") {
+        prune_empty_hook_events(hooks);
+    }
+
+    if let Some(root) = hooks_json.as_object_mut() {
+        let hooks_empty = root
+            .get("hooks")
+            .and_then(serde_json::Value::as_object)
+            .map(|hooks| hooks.is_empty())
+            .unwrap_or(false);
+        if hooks_empty {
+            root.remove("hooks");
+        }
+        if root.is_empty() {
+            fs::remove_file(&hooks_file)
+                .with_context(|| format!("Failed to remove {}", hooks_file.display()))?;
+            return Ok(true);
+        }
+    }
+
+    fs::write(&hooks_file, serde_json::to_string_pretty(&hooks_json)?)
+        .with_context(|| format!("Failed to write {}", hooks_file.display()))?;
+
+    Ok(true)
+}
+
+fn is_codex_hooks_installed(home: &Path) -> bool {
+    let hooks_file = home.join(".codex/hooks.json");
+    fs::read_to_string(hooks_file)
+        .ok()
+        .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+        .map(|hooks_json| hook_value_contains_owned_command(&hooks_json))
+        .unwrap_or(false)
+}
+
+fn is_claude_hooks_installed(home: &Path) -> bool {
     home.join(".claude/hooks/prevent-sleep.sh").exists()
 }
 
+fn is_installed() -> bool {
+    let home = resolve_user_home().unwrap_or_default();
+    is_claude_hooks_installed(&home) && is_codex_hooks_installed(&home)
+}
+
 fn run_first_time_setup() -> Result<()> {
-    let message = "Claude Sleep Preventer needs to be configured to work with Claude Code.
+    let message =
+        "Agents Sleep Preventer needs to be configured to work with Claude Code and Codex.
 
 This will:
 • Install the CLI tool
-• Configure Claude Code hooks
+• Configure coding agent hooks
 • Set up automatic startup
 
 Administrator password required.";
 
-    if !native_dialogs::show_confirm_dialog(message, "Claude Sleep Preventer", "Set Up", "Cancel") {
+    if !native_dialogs::show_confirm_dialog(message, "Agents Sleep Preventer", "Set Up", "Cancel") {
         return Ok(());
     }
 
-    let script =
-        "/Applications/ClaudeSleepPreventer.app/Contents/MacOS/claude-sleep-preventer install -y";
+    let script = "/Applications/AgentsSleepPreventer.app/Contents/MacOS/asp install -y";
 
     match authorization::execute_script_with_privileges(script) {
         Ok(true) => {
             native_dialogs::show_dialog(
-                "Setup complete!\n\nRestart Claude Code to activate sleep prevention.",
-                "Claude Sleep Preventer",
+                "Setup complete!\n\nRestart Claude Code or Codex to activate sleep prevention.",
+                "Agents Sleep Preventer",
             );
             relaunch_app_after_install();
         }
@@ -778,7 +1219,7 @@ Administrator password required.";
             // User cancelled
         }
         Err(e) => {
-            native_dialogs::show_dialog(&format!("Setup failed: {}", e), "Claude Sleep Preventer");
+            native_dialogs::show_dialog(&format!("Setup failed: {}", e), "Agents Sleep Preventer");
         }
     }
 
@@ -788,7 +1229,7 @@ Administrator password required.";
 fn relaunch_app_after_install() {
     logging::log("[main] Relaunching app after install...");
     match Command::new("open")
-        .args(["-n", "/Applications/ClaudeSleepPreventer.app"])
+        .args(["-n", "/Applications/AgentsSleepPreventer.app"])
         .status()
     {
         Ok(status) if status.success() => {
@@ -967,7 +1408,7 @@ fn cmd_menubar() -> Result<()> {
         .with_menu(Box::new(minimal_menu))
         .with_menu_on_left_click(false) // Left-click shows popover, right-click shows menu
         .with_title(&create_tray_title(initial_instances.len(), manual_enabled))
-        .with_tooltip("Claude Code Sleep Preventer")
+        .with_tooltip("Agents Sleep Preventer")
         .build()?;
 
     let menu_channel = MenuEvent::receiver();
@@ -1104,7 +1545,7 @@ fn cmd_menubar() -> Result<()> {
                     let pstate = popover::PopoverState {
                         manual_enabled: MANUAL_SLEEP_PREVENTION.load(Ordering::SeqCst),
                         instances: get_instance_items(),
-                        inactive: get_inactive_claude_pids(),
+                        inactive: get_inactive_agent_pids(),
                         thermal_warning: check_thermal_warning(),
                         dictation_enabled: dictation_manager.is_enabled(),
                         dictation_available: dictation_manager.is_available(),
@@ -1142,7 +1583,7 @@ fn cmd_menubar() -> Result<()> {
                         focus_terminal_by_pid(instances[idx].0);
                     }
                 } else if event.id == hotkey_inactive_id {
-                    let inactive = get_inactive_claude_pids();
+                    let inactive = get_inactive_agent_pids();
                     if !inactive.is_empty() {
                         let idx =
                             CURRENT_INACTIVE_INDEX.fetch_add(1, Ordering::SeqCst) % inactive.len();
@@ -1239,7 +1680,7 @@ fn cmd_agent() -> Result<()> {
 fn acquire_agent_lock() -> Result<Option<std::fs::File>> {
     let lock_dir = dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join("ClaudeSleepPreventer");
+        .join("AgentsSleepPreventer");
     fs::create_dir_all(&lock_dir)?;
     let lock_path = lock_dir.join("agent.lock");
     let mut file = fs::OpenOptions::new()
@@ -1275,55 +1716,59 @@ fn ask_yes_no(prompt: &str) -> bool {
 
 fn sync_installed_cli() -> Result<bool> {
     let current_exe = std::env::current_exe().context("Could not find current executable")?;
-    let target = Path::new("/usr/local/bin/claude-sleep-preventer");
-
-    if current_exe == target {
-        return Ok(false);
-    }
-
     fs::create_dir_all("/usr/local/bin")?;
-    fs::copy(&current_exe, target).with_context(|| {
-        format!(
-            "Failed to copy {} to {}",
-            current_exe.display(),
-            target.display()
-        )
-    })?;
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(target, fs::Permissions::from_mode(0o755))?;
+    let mut updated = false;
+    for target in [
+        Path::new("/usr/local/bin/asp"),
+        Path::new("/usr/local/bin/agents-sleep-preventer"),
+    ] {
+        if current_exe == target {
+            continue;
+        }
+
+        fs::copy(&current_exe, target).with_context(|| {
+            format!(
+                "Failed to copy {} to {}",
+                current_exe.display(),
+                target.display()
+            )
+        })?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(target, fs::Permissions::from_mode(0o755))?;
+        }
+        updated = true;
     }
 
-    Ok(true)
+    let _ = fs::remove_file("/usr/local/bin/claude-sleep-preventer");
+
+    Ok(updated)
 }
 
 fn cmd_install(auto_yes: bool) -> Result<()> {
-    let home = dirs::home_dir().context("Could not find home directory")?;
+    let home = resolve_user_home()?;
     let hooks_dir = home.join(".claude").join("hooks");
     let settings_file = home.join(".claude").join("settings.json");
     let launch_agents_dir = home.join("Library/LaunchAgents");
 
     match sync_installed_cli() {
-        Ok(true) => println!("Updated /usr/local/bin/claude-sleep-preventer"),
+        Ok(true) => println!("Updated /usr/local/bin/asp"),
         Ok(false) => {}
-        Err(e) => eprintln!(
-            "Warning: could not update /usr/local/bin/claude-sleep-preventer: {}",
-            e
-        ),
+        Err(e) => eprintln!("Warning: could not update /usr/local/bin/asp: {}", e),
     }
 
     fs::create_dir_all(&hooks_dir)?;
 
-    let app_binary = "/Applications/ClaudeSleepPreventer.app/Contents/MacOS/claude-sleep-preventer";
     let prevent_script = format!(
         "#!/bin/bash\n[ -x \"{}\" ] && \"{}\" start 2>/dev/null || true\n",
-        app_binary, app_binary
+        APP_BINARY_PATH, APP_BINARY_PATH
     );
     let allow_script = format!(
         "#!/bin/bash\n[ -x \"{}\" ] && \"{}\" stop 2>/dev/null || true\n",
-        app_binary, app_binary
+        APP_BINARY_PATH, APP_BINARY_PATH
     );
 
     fs::write(hooks_dir.join("prevent-sleep.sh"), prevent_script)?;
@@ -1341,12 +1786,7 @@ fn cmd_install(auto_yes: bool) -> Result<()> {
             fs::Permissions::from_mode(0o755),
         )?;
 
-        // Fix ownership if running as root (via sudo)
-        if let Ok(sudo_user) = std::env::var("SUDO_USER") {
-            let _ = Command::new("chown")
-                .args(["-R", &sudo_user, hooks_dir.to_str().unwrap()])
-                .status();
-        }
+        fix_user_ownership(&hooks_dir);
     }
 
     println!("Setting up passwordless sudo for pmset...");
@@ -1360,13 +1800,13 @@ fn cmd_install(auto_yes: bool) -> Result<()> {
     let is_root = unsafe { libc::geteuid() == 0 };
     let mut child = if is_root {
         Command::new("tee")
-            .arg("/etc/sudoers.d/claude-pmset")
+            .arg("/etc/sudoers.d/agents-pmset")
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::null())
             .spawn()?
     } else {
         Command::new("sudo")
-            .args(["tee", "/etc/sudoers.d/claude-pmset"])
+            .args(["tee", "/etc/sudoers.d/agents-pmset"])
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::null())
             .spawn()?
@@ -1379,12 +1819,18 @@ fn cmd_install(auto_yes: bool) -> Result<()> {
 
     if is_root {
         Command::new("chmod")
-            .args(["440", "/etc/sudoers.d/claude-pmset"])
+            .args(["440", "/etc/sudoers.d/agents-pmset"])
             .output()?;
+        let _ = Command::new("rm")
+            .args(["-f", "/etc/sudoers.d/claude-pmset"])
+            .output();
     } else {
         Command::new("sudo")
-            .args(["chmod", "440", "/etc/sudoers.d/claude-pmset"])
+            .args(["chmod", "440", "/etc/sudoers.d/agents-pmset"])
             .output()?;
+        let _ = Command::new("sudo")
+            .args(["rm", "-f", "/etc/sudoers.d/claude-pmset"])
+            .output();
     }
 
     println!("Configuring Claude Code hooks...");
@@ -1423,13 +1869,11 @@ fn cmd_install(auto_yes: bool) -> Result<()> {
         println!("  Created {}", settings_file.display());
     }
 
-    // Fix ownership of settings.json if running as root (via sudo)
     #[cfg(unix)]
-    if let Ok(sudo_user) = std::env::var("SUDO_USER") {
-        let _ = Command::new("chown")
-            .args([&sudo_user, settings_file.to_str().unwrap()])
-            .status();
-    }
+    fix_user_ownership(&settings_file);
+
+    println!("Configuring Codex hooks...");
+    install_codex_hooks(&home, APP_BINARY_PATH)?;
 
     if is_root {
         Command::new("pmset").args(["-a", "sleep", "5"]).output()?;
@@ -1454,11 +1898,11 @@ fn cmd_install(auto_yes: bool) -> Result<()> {
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.charlontank.claude-sleep-preventer</string>
+    <string>com.charlontank.agents-sleep-preventer</string>
     <key>ProgramArguments</key>
     <array>
         <string>/usr/bin/open</string>
-        <string>/Applications/ClaudeSleepPreventer.app</string>
+        <string>/Applications/AgentsSleepPreventer.app</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -1467,32 +1911,32 @@ fn cmd_install(auto_yes: bool) -> Result<()> {
 </dict>
 </plist>"#;
 
-        let plist_path = launch_agents_dir.join("com.charlontank.claude-sleep-preventer.plist");
+        let plist_path = launch_agents_dir.join("com.charlontank.agents-sleep-preventer.plist");
         fs::write(&plist_path, plist)?;
 
         println!("  Created LaunchAgent for login startup");
-        println!("  Note: Copy ClaudeSleepPreventer.app to /Applications");
+        println!("  Note: Copy AgentsSleepPreventer.app to /Applications");
     }
 
     println!("\n✅ Installation complete!");
-    println!("\nRestart Claude Code to activate.");
+    println!("\nRestart Claude Code or Codex to activate.");
     println!("\nCommands:");
-    println!("  claude-sleep-preventer status   - Show current state");
-    println!("  claude-sleep-preventer cleanup  - Clean up stale PIDs");
-    println!("  claude-sleep-preventer reset    - Force enable sleep");
-    println!("  claude-sleep-preventer menubar  - Run native menu bar");
-    println!("  claude-sleep-preventer daemon   - Run background daemon");
+    println!("  asp status   - Show current state");
+    println!("  asp cleanup  - Clean up stale PIDs");
+    println!("  asp reset    - Force enable sleep");
+    println!("  asp menubar  - Run native menu bar");
+    println!("  asp daemon   - Run background daemon");
 
     // Try to launch the app
     let _ = Command::new("open")
-        .arg("/Applications/ClaudeSleepPreventer.app")
+        .arg("/Applications/AgentsSleepPreventer.app")
         .spawn();
 
     Ok(())
 }
 
 fn cmd_uninstall(keep_model: bool, keep_hooks: bool, keep_data: bool) -> Result<()> {
-    let home = dirs::home_dir().context("Could not find home directory")?;
+    let home = resolve_user_home()?;
     let hooks_dir = home.join(".claude").join("hooks");
     let settings_file = home.join(".claude").join("settings.json");
     let launch_agents_dir = home.join("Library/LaunchAgents");
@@ -1515,26 +1959,37 @@ fn cmd_uninstall(keep_model: bool, keep_hooks: bool, keep_data: bool) -> Result<
                 }
             }
         }
-        println!("Removed Claude Code hooks");
+        if remove_codex_hooks(&home)? {
+            println!("Removed Codex hooks");
+        }
+        println!("Removed coding agent hooks");
     }
 
-    // Remove LaunchAgent
-    let plist_path = launch_agents_dir.join("com.charlontank.claude-sleep-preventer.plist");
-    if plist_path.exists() {
-        let _ = Command::new("launchctl")
-            .args(["unload", plist_path.to_str().unwrap()])
-            .output();
-        let _ = fs::remove_file(&plist_path);
-        println!("Removed LaunchAgent");
+    // Remove LaunchAgents
+    for label in [
+        "com.charlontank.agents-sleep-preventer.plist",
+        "com.charlontank.claude-sleep-preventer.plist",
+    ] {
+        let plist_path = launch_agents_dir.join(label);
+        if plist_path.exists() {
+            let _ = Command::new("launchctl")
+                .args(["unload", plist_path.to_str().unwrap()])
+                .output();
+            let _ = fs::remove_file(&plist_path);
+            println!("Removed LaunchAgent {}", label);
+        }
     }
 
     // Remove sudoers config
-    Command::new("sudo")
-        .args(["rm", "-f", "/etc/sudoers.d/claude-pmset"])
-        .output()?;
+    for sudoers_path in ["/etc/sudoers.d/agents-pmset", "/etc/sudoers.d/claude-pmset"] {
+        Command::new("sudo")
+            .args(["rm", "-f", sudoers_path])
+            .output()?;
+    }
 
     // Remove PID tracking directory
     let _ = fs::remove_dir_all(PIDS_DIR);
+    let _ = fs::remove_dir_all(LEGACY_PIDS_DIR);
 
     // Reset sleep settings
     Command::new("sudo")
@@ -1543,41 +1998,54 @@ fn cmd_uninstall(keep_model: bool, keep_hooks: bool, keep_data: bool) -> Result<
 
     // Remove app data and preferences (unless keeping data)
     if !keep_data {
-        let app_support = home.join("Library/Application Support/ClaudeSleepPreventer");
-        if app_support.exists() {
-            if keep_model {
-                if let Ok(entries) = fs::read_dir(&app_support) {
-                    for entry in entries.flatten() {
-                        let name = entry.file_name();
-                        if name == std::ffi::OsStr::new("models") {
-                            continue;
-                        }
-                        let path = entry.path();
-                        if path.is_dir() {
-                            let _ = fs::remove_dir_all(&path);
-                        } else {
-                            let _ = fs::remove_file(&path);
+        for app_support in [
+            home.join("Library/Application Support/AgentsSleepPreventer"),
+            home.join("Library/Application Support/ClaudeSleepPreventer"),
+        ] {
+            if app_support.exists() {
+                if keep_model {
+                    if let Ok(entries) = fs::read_dir(&app_support) {
+                        for entry in entries.flatten() {
+                            let name = entry.file_name();
+                            if name == std::ffi::OsStr::new("models") {
+                                continue;
+                            }
+                            let path = entry.path();
+                            if path.is_dir() {
+                                let _ = fs::remove_dir_all(&path);
+                            } else {
+                                let _ = fs::remove_file(&path);
+                            }
                         }
                     }
+                    println!("Removed app data (kept Whisper model)");
+                } else {
+                    let _ = fs::remove_dir_all(&app_support);
+                    println!("Removed app data and Whisper model");
                 }
-                println!("Removed app data (kept Whisper model)");
-            } else {
-                let _ = fs::remove_dir_all(&app_support);
-                println!("Removed app data and Whisper model");
             }
         }
 
         // Remove logs
-        let logs_dir = home.join("Library/Logs/ClaudeSleepPreventer");
-        let _ = fs::remove_dir_all(&logs_dir);
+        let _ = fs::remove_dir_all(home.join("Library/Logs/AgentsSleepPreventer"));
+        let _ = fs::remove_dir_all(home.join("Library/Logs/ClaudeSleepPreventer"));
         println!("Removed logs");
     }
 
     // Remove the app from /Applications
     Command::new("sudo")
-        .args(["rm", "-rf", "/Applications/ClaudeSleepPreventer.app"])
+        .args([
+            "rm",
+            "-rf",
+            "/Applications/AgentsSleepPreventer.app",
+            "/Applications/ClaudeSleepPreventer.app",
+        ])
         .output()?;
     println!("Removed app from /Applications");
+
+    let _ = fs::remove_file("/usr/local/bin/asp");
+    let _ = fs::remove_file("/usr/local/bin/agents-sleep-preventer");
+    let _ = fs::remove_file("/usr/local/bin/claude-sleep-preventer");
 
     println!("Uninstalled successfully");
 
@@ -1610,18 +2078,35 @@ fn cmd_debug() -> Result<()> {
     let sys = System::new_all();
     for (pid, proc) in sys.processes() {
         let name = proc.name().to_string_lossy();
-        if name.to_lowercase().contains("claude") {
+        let lower = name.to_lowercase();
+        if lower.contains("claude") || lower.contains("codex") {
             println!("  PID {}: name={:?}", pid.as_u32(), name);
         }
     }
 
     println!("\nps command:");
-    let output = Command::new("ps").args(["-eo", "pid,comm"]).output()?;
+    let output = Command::new("ps")
+        .args(["-eo", "pid=,ppid=,comm=,args="])
+        .output()?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     for line in stdout.lines() {
-        if line.to_lowercase().contains("claude") {
+        let lower = line.to_lowercase();
+        if lower.contains("claude") || lower.contains("codex") {
             println!("  {}", line.trim());
         }
+    }
+
+    println!("\nDetected agent PIDs:");
+    for process in get_all_agent_processes() {
+        let kind = match classify_agent_process(&process) {
+            Some(AgentKind::Claude) => "claude",
+            Some(AgentKind::Codex) => "codex",
+            None => "unknown",
+        };
+        println!(
+            "  PID {}: kind={}, ppid={}, comm={}, args={}",
+            process.pid, kind, process.ppid, process.comm, process.args
+        );
     }
 
     Ok(())

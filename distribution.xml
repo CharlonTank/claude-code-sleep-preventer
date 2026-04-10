@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <installer-gui-script minSpecVersion="1">
-    <title>Claude Sleep Preventer</title>
+    <title>Agents Sleep Preventer</title>
     <organization>com.charlontank</organization>
     <domains enable_localSystem="true"/>
     <options customize="never" require-scripts="true" rootVolumeOnly="true"/>
@@ -9,11 +9,11 @@
         <line choice="default"/>
     </choices-outline>
 
-    <choice id="default" title="Claude Sleep Preventer" visible="false">
-        <pkg-ref id="com.charlontank.claude-sleep-preventer-cli"/>
-        <pkg-ref id="com.charlontank.claude-sleep-preventer"/>
+    <choice id="default" title="Agents Sleep Preventer" visible="false">
+        <pkg-ref id="com.charlontank.agents-sleep-preventer-cli"/>
+        <pkg-ref id="com.charlontank.agents-sleep-preventer"/>
     </choice>
 
-    <pkg-ref id="com.charlontank.claude-sleep-preventer-cli" version="3.0.3">ClaudeSleepPreventer-cli.pkg</pkg-ref>
-    <pkg-ref id="com.charlontank.claude-sleep-preventer" version="3.0.3">ClaudeSleepPreventer-app.pkg</pkg-ref>
+    <pkg-ref id="com.charlontank.agents-sleep-preventer-cli" version="4.0.0">AgentsSleepPreventer-cli.pkg</pkg-ref>
+    <pkg-ref id="com.charlontank.agents-sleep-preventer" version="4.0.0">AgentsSleepPreventer-app.pkg</pkg-ref>
 </installer-gui-script>

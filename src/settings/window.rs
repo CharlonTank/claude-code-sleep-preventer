@@ -192,8 +192,8 @@ fn settings_target_class() -> &'static objc::runtime::Class {
     static CLASS: OnceLock<ClassPtr> = OnceLock::new();
     let class_ptr = CLASS.get_or_init(|| {
         let superclass = class!(NSObject);
-        let mut decl = ClassDecl::new("CCSPSettingsTarget", superclass)
-            .expect("Failed to create CCSPSettingsTarget class");
+        let mut decl = ClassDecl::new("ASPSettingsTarget", superclass)
+            .expect("Failed to create ASPSettingsTarget class");
         decl.add_ivar::<*mut c_void>("rustState");
         decl.add_ivar::<*mut c_void>("vocabularyTextView");
         unsafe {
@@ -323,7 +323,7 @@ impl SettingsWindow {
                 let toggle_desc_frame =
                     NSRect::new(NSPoint::new(20.0, 115.0), NSSize::new(380.0, 40.0));
                 let toggle_desc = create_label(
-                    "When enabled, prevents your Mac from sleeping while Claude Code is actively working.",
+                    "When enabled, prevents your Mac from sleeping while coding agents are actively working.",
                     toggle_desc_frame,
                     body_font,
                     body_color,

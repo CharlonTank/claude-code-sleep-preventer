@@ -1,20 +1,20 @@
 <div align="center">
 
-# ☕ Claude Code Sleep Preventer
+# ☕ Agents Sleep Preventer
 
-### Keep your Mac awake while Claude Code is working
+### Keep your Mac awake while coding agents are working
 **Close your laptop lid. Walk away. Come back to finished work.**
 
 <br>
 
-[![Download DMG](https://img.shields.io/badge/Download-DMG%20Installer-blue?style=for-the-badge&logo=apple)](https://github.com/CharlonTank/claude-code-sleep-preventer/releases/latest/download/ClaudeSleepPreventer-3.0.3.dmg)
+[![Download DMG](https://img.shields.io/badge/Download-DMG%20Installer-blue?style=for-the-badge&logo=apple)](https://github.com/CharlonTank/agents-sleep-preventer/releases/latest/download/AgentsSleepPreventer-4.0.0.dmg)
 
 <br>
 
 ![macOS](https://img.shields.io/badge/macOS-000000?style=flat&logo=apple&logoColor=white)
 ![Rust](https://img.shields.io/badge/Rust-000000?style=flat&logo=rust&logoColor=white)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![GitHub release](https://img.shields.io/github/v/release/CharlonTank/claude-code-sleep-preventer)](https://github.com/CharlonTank/claude-code-sleep-preventer/releases)
+[![GitHub release](https://img.shields.io/github/v/release/CharlonTank/agents-sleep-preventer)](https://github.com/CharlonTank/agents-sleep-preventer/releases)
 
 </div>
 
@@ -22,19 +22,19 @@
 
 ## The Problem
 
-You ask Claude to refactor your codebase. It's going to take 10 minutes. You close your MacBook lid to grab coffee...
+You ask your coding agent to refactor your codebase. It's going to take 10 minutes. You close your MacBook lid to grab coffee...
 
-**💀 Mac sleeps. Claude stops. Work lost.**
+**💀 Mac sleeps. The agent stops. Work lost.**
 
 ## The Solution
 
-Install this tool. Now your Mac stays awake while Claude works, even with the lid closed. When Claude finishes, normal sleep resumes.
+Install this tool. Now your Mac stays awake while your agent works, even with the lid closed. When it finishes, normal sleep resumes.
 
 <div align="center">
 
 | Before | After |
 |--------|-------|
-| 😴 Lid closed = Mac sleeps | ☕ Lid closed = Claude keeps working |
+| 😴 Lid closed = Mac sleeps | ☕ Lid closed = agent keeps working |
 | 🔄 Come back to interrupted work | ✅ Come back to finished work |
 
 </div>
@@ -45,10 +45,10 @@ Install this tool. Now your Mac stays awake while Claude works, even with the li
 
 ### 🍎 Download DMG (Easiest)
 
-1. [Download the latest DMG](https://github.com/CharlonTank/claude-code-sleep-preventer/releases/latest/download/ClaudeSleepPreventer-3.0.3.dmg)
-2. Drag `ClaudeSleepPreventer.app` to Applications
+1. [Download the latest DMG](https://github.com/CharlonTank/agents-sleep-preventer/releases/latest/download/AgentsSleepPreventer-4.0.0.dmg)
+2. Drag `AgentsSleepPreventer.app` to Applications
 3. Launch the app - it will auto-configure on first run
-4. Restart Claude Code
+4. Restart Claude Code or Codex
 
 The menu bar app uses Sparkle for in-app updates and can download + install new signed releases directly.
 
@@ -56,17 +56,17 @@ The menu bar app uses Sparkle for in-app updates and can download + install new 
 
 ```bash
 brew tap CharlonTank/tap
-brew install claude-sleep-preventer
-claude-sleep-preventer install
+brew install agents-sleep-preventer
+asp install
 ```
 
 ### 🦀 Build from Source
 
 ```bash
-git clone https://github.com/CharlonTank/claude-code-sleep-preventer.git
-cd claude-code-sleep-preventer
+git clone https://github.com/CharlonTank/agents-sleep-preventer.git
+cd agents-sleep-preventer
 cargo build --release
-./target/release/claude-sleep-preventer install
+./target/release/asp install
 ```
 
 ---
@@ -76,9 +76,9 @@ cargo build --release
 ```
 You send a prompt
        ↓
-   Claude starts working → 🔒 Sleep disabled
+   Agent starts working → 🔒 Sleep disabled
        ↓
-   Claude finishes → 🔓 Sleep re-enabled
+   Agent finishes → 🔓 Sleep re-enabled
 ```
 
 That's it. No configuration needed.
@@ -88,9 +88,9 @@ That's it. No configuration needed.
 ## Commands
 
 ```bash
-claude-sleep-preventer status     # Check current state
-claude-sleep-preventer cleanup    # Clean up after interrupts
-claude-sleep-preventer uninstall  # Remove completely
+asp status     # Check current state
+asp cleanup    # Clean up after interrupts
+asp uninstall  # Remove completely
 ```
 
 ---
@@ -100,10 +100,10 @@ claude-sleep-preventer uninstall  # Remove completely
 **Does it drain my battery?**
 No more than usual. Your Mac just stays awake instead of sleeping.
 
-**What if I interrupt Claude with Ctrl+C?**
-Run `claude-sleep-preventer cleanup` or the tool auto-detects idle sessions after 10 seconds.
+**What if I interrupt an agent with Ctrl+C?**
+Run `asp cleanup` or the tool auto-detects idle sessions after 30 seconds.
 
-**Does it work with multiple Claude instances?**
+**Does it work with multiple agent instances?**
 Yes! Mac stays awake until ALL instances finish.
 
 **How do app updates work?**
@@ -113,8 +113,8 @@ The menu bar app uses Sparkle. Use `Check for Updates...` from the menu bar app,
 
 <div align="center">
 
-Made with ☕ for Claude Code users
+Made with ☕ for coding agent users
 
-[Report Issue](https://github.com/CharlonTank/claude-code-sleep-preventer/issues) · [View Releases](https://github.com/CharlonTank/claude-code-sleep-preventer/releases)
+[Report Issue](https://github.com/CharlonTank/agents-sleep-preventer/issues) · [View Releases](https://github.com/CharlonTank/agents-sleep-preventer/releases)
 
 </div>

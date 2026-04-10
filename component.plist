@@ -12,7 +12,7 @@
         <key>BundleOverwriteAction</key>
         <string>upgrade</string>
         <key>RootRelativeBundlePath</key>
-        <string>Applications/ClaudeSleepPreventer.app</string>
+        <string>Applications/AgentsSleepPreventer.app</string>
     </dict>
 </array>
 </plist>

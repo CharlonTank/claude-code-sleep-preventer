@@ -1,24 +1,24 @@
 <?xml version="1.0" encoding="utf-8"?>
 <installer-gui-script minSpecVersion="1">
-    <title>Claude Sleep Preventer</title>
+    <title>Agents Sleep Preventer</title>
     <organization>com.charlontank</organization>
-    <pkg-ref id="com.charlontank.claude-sleep-preventer-cli"/>
-    <pkg-ref id="com.charlontank.claude-sleep-preventer"/>
+    <pkg-ref id="com.charlontank.agents-sleep-preventer-cli"/>
+    <pkg-ref id="com.charlontank.agents-sleep-preventer"/>
     <domains enable_localSystem="true"/>
     <options customize="never" require-scripts="true" hostArchitectures="x86_64,arm64" rootVolumeOnly="true"/>
     <choices-outline>
         <line choice="default">
-            <line choice="com.charlontank.claude-sleep-preventer-cli"/>
-            <line choice="com.charlontank.claude-sleep-preventer"/>
+            <line choice="com.charlontank.agents-sleep-preventer-cli"/>
+            <line choice="com.charlontank.agents-sleep-preventer"/>
         </line>
     </choices-outline>
     <choice id="default"/>
-    <choice id="com.charlontank.claude-sleep-preventer-cli" visible="false">
-        <pkg-ref id="com.charlontank.claude-sleep-preventer-cli"/>
+    <choice id="com.charlontank.agents-sleep-preventer-cli" visible="false">
+        <pkg-ref id="com.charlontank.agents-sleep-preventer-cli"/>
     </choice>
-    <pkg-ref id="com.charlontank.claude-sleep-preventer-cli" version="3.0.3" onConclusion="none">ClaudeSleepPreventer-cli.pkg</pkg-ref>
-    <choice id="com.charlontank.claude-sleep-preventer" visible="false">
-        <pkg-ref id="com.charlontank.claude-sleep-preventer"/>
+    <pkg-ref id="com.charlontank.agents-sleep-preventer-cli" version="4.0.0" onConclusion="none">AgentsSleepPreventer-cli.pkg</pkg-ref>
+    <choice id="com.charlontank.agents-sleep-preventer" visible="false">
+        <pkg-ref id="com.charlontank.agents-sleep-preventer"/>
     </choice>
-    <pkg-ref id="com.charlontank.claude-sleep-preventer" version="3.0.3" onConclusion="none">ClaudeSleepPreventer-app.pkg</pkg-ref>
+    <pkg-ref id="com.charlontank.agents-sleep-preventer" version="4.0.0" onConclusion="none">AgentsSleepPreventer-app.pkg</pkg-ref>
 </installer-gui-script>

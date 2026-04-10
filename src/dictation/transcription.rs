@@ -80,6 +80,12 @@ impl WhisperTranscriber {
     fn app_support_dir() -> PathBuf {
         dirs::data_local_dir()
             .unwrap_or_else(|| PathBuf::from("/tmp"))
+            .join("AgentsSleepPreventer")
+    }
+
+    fn legacy_app_support_dir() -> PathBuf {
+        dirs::data_local_dir()
+            .unwrap_or_else(|| PathBuf::from("/tmp"))
             .join("ClaudeSleepPreventer")
     }
 
@@ -87,10 +93,13 @@ impl WhisperTranscriber {
         let model_name = env::var("WHISPER_MODEL").unwrap_or_else(|_| "medium".to_string());
 
         // Check app support directory first (our downloaded models)
-        let app_models_dir = Self::app_support_dir().join("models");
-        let app_model = app_models_dir.join(format!("ggml-{}.bin", model_name));
-        if app_model.exists() {
-            return Some(app_model);
+        for app_support_dir in [Self::app_support_dir(), Self::legacy_app_support_dir()] {
+            let app_model = app_support_dir
+                .join("models")
+                .join(format!("ggml-{}.bin", model_name));
+            if app_model.exists() {
+                return Some(app_model);
+            }
         }
 
         // Check homebrew location (if user had it installed before)

@@ -2,19 +2,31 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 const SIGNING_IDENTITY: &str = "Developer ID Application";
 const SPARKLE_VERSION: &str = "2.9.0";
 const SPARKLE_RELEASE_URL: &str =
     "https://github.com/sparkle-project/Sparkle/releases/download/2.9.0/Sparkle-for-Swift-Package-Manager.zip";
-const SPARKLE_KEY_ACCOUNT: &str = "CharlonTank-claude-sleep-preventer";
+const SPARKLE_KEY_ACCOUNT: &str = "CharlonTank-agents-sleep-preventer";
+const LEGACY_SPARKLE_KEY_ACCOUNT: &str = "CharlonTank-claude-sleep-preventer";
 const SPARKLE_APPCAST_ASSET_NAME: &str = "appcast.xml";
-const GITHUB_REPO: &str = "CharlonTank/claude-code-sleep-preventer";
+const GITHUB_REPO: &str = "CharlonTank/agents-sleep-preventer";
+const OWNED_HOOK_MARKERS: [&str; 4] = [
+    "AgentsSleepPreventer.app/Contents/MacOS/asp",
+    "/usr/local/bin/asp",
+    "/usr/local/bin/agents-sleep-preventer",
+    "claude-sleep-preventer",
+];
+
+struct AppcastArtifacts {
+    appcast_path: PathBuf,
+    release_notes_path: PathBuf,
+}
 
 #[derive(Parser)]
 #[command(name = "xtask")]
-#[command(about = "Build tasks for Claude Sleep Preventer")]
+#[command(about = "Build tasks for Agents Sleep Preventer")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -28,7 +40,7 @@ enum Commands {
         #[arg(long)]
         skip_notarize: bool,
     },
-    /// Clean all CCSP data from the system
+    /// Clean all ASP data from the system
     Clean {
         /// Keep Whisper model data (~500 MB)
         #[arg(long)]
@@ -100,7 +112,7 @@ fn complete_test(skip_notarize: bool, keep_model: bool) -> Result<()> {
     // Step 3: Open DMG
     println!("\n>>> Step 3: Opening DMG...");
     let version = get_version()?;
-    let dmg_name = format!("ClaudeSleepPreventer-{}.dmg", version);
+    let dmg_name = format!("AgentsSleepPreventer-{}.dmg", version);
     run("open", &[&dmg_name])?;
 
     println!("\n=== Test ready! ===");
@@ -236,6 +248,10 @@ fn release_tag_url(version: &str) -> String {
     format!("{}/releases/tag/v{}", github_repo_url(), version)
 }
 
+fn release_title(version: &str) -> String {
+    format!("Agents Sleep Preventer {}", version)
+}
+
 fn copy_with_ditto(src: &Path, dst: &Path) -> Result<()> {
     if dst.exists() {
         if dst.is_dir() {
@@ -342,14 +358,14 @@ fn build_release_notes(version: &str, output_path: &Path) -> Result<()> {
     }
 
     let notes = format!(
-        "# Claude Sleep Preventer {version}\n\nThis release includes improvements and fixes.\n\nSee the full release notes on GitHub:\n{release_url}\n",
+        "# Agents Sleep Preventer {version}\n\nThis release includes improvements and fixes.\n\nSee the full release notes on GitHub:\n{release_url}\n",
         release_url = release_tag_url(version)
     );
     fs::write(output_path, notes)?;
     Ok(())
 }
 
-fn generate_appcast(version: &str) -> Result<PathBuf> {
+fn generate_appcast(version: &str) -> Result<AppcastArtifacts> {
     let sparkle_root = ensure_sparkle()?;
     let generate_appcast_bin = sparkle_root.join("bin").join("generate_appcast");
     let staging_dir = Path::new("target").join("release").join("sparkle-appcast");
@@ -358,49 +374,63 @@ fn generate_appcast(version: &str) -> Result<PathBuf> {
     }
     fs::create_dir_all(&staging_dir)?;
 
-    let dmg_name = format!("ClaudeSleepPreventer-{}.dmg", version);
+    let dmg_name = format!("AgentsSleepPreventer-{}.dmg", version);
     let dmg_source = Path::new(&dmg_name);
     let dmg_staging_path = staging_dir.join(&dmg_name);
     fs::copy(dmg_source, &dmg_staging_path)?;
 
-    let release_notes_path = staging_dir.join(format!("ClaudeSleepPreventer-{}.md", version));
+    let release_notes_path = staging_dir.join(format!("AgentsSleepPreventer-{}.md", version));
     build_release_notes(version, &release_notes_path)?;
 
     let appcast_path = staging_dir.join(SPARKLE_APPCAST_ASSET_NAME);
-    let curl_status = Command::new("curl")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .args([
-            "-fsSL",
-            "-o",
-            appcast_path.to_str().unwrap(),
-            &latest_appcast_url(),
-        ])
-        .status()?;
-    if !curl_status.success() && appcast_path.exists() {
-        fs::remove_file(&appcast_path)?;
-    }
-
     let download_prefix = release_asset_base_url(version);
     let release_url = release_tag_url(version);
     let repo_url = github_repo_url();
-    let args = vec![
-        "--account",
-        SPARKLE_KEY_ACCOUNT,
-        "--download-url-prefix",
-        download_prefix.as_str(),
-        "--embed-release-notes",
-        "--full-release-notes-url",
-        release_url.as_str(),
-        "--link",
-        repo_url.as_str(),
-        "--versions",
-        version,
-        "-o",
-        appcast_path.to_str().unwrap(),
-        staging_dir.to_str().unwrap(),
-    ];
-    run(generate_appcast_bin.to_str().unwrap(), &args)?;
+    let mut generated = false;
+    for account in [SPARKLE_KEY_ACCOUNT, LEGACY_SPARKLE_KEY_ACCOUNT] {
+        let args = vec![
+            "--account",
+            account,
+            "--download-url-prefix",
+            download_prefix.as_str(),
+            "--embed-release-notes",
+            "--full-release-notes-url",
+            release_url.as_str(),
+            "--link",
+            repo_url.as_str(),
+            "--versions",
+            version,
+            "-o",
+            appcast_path.to_str().unwrap(),
+            staging_dir.to_str().unwrap(),
+        ];
+
+        println!("  Generating Sparkle appcast with key account: {}", account);
+        if Command::new(&generate_appcast_bin)
+            .args(&args)
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+        {
+            generated = true;
+            break;
+        }
+
+        if account == SPARKLE_KEY_ACCOUNT {
+            println!(
+                "  Sparkle key account {} failed, trying legacy account {}...",
+                SPARKLE_KEY_ACCOUNT, LEGACY_SPARKLE_KEY_ACCOUNT
+            );
+        }
+    }
+
+    if !generated {
+        bail!(
+            "Failed to generate Sparkle appcast with key accounts {} or {}",
+            SPARKLE_KEY_ACCOUNT,
+            LEGACY_SPARKLE_KEY_ACCOUNT
+        );
+    }
 
     if !appcast_path.exists() {
         bail!(
@@ -409,17 +439,22 @@ fn generate_appcast(version: &str) -> Result<PathBuf> {
         );
     }
 
-    Ok(appcast_path)
+    verify_appcast_file(version, &appcast_path)?;
+
+    Ok(AppcastArtifacts {
+        appcast_path,
+        release_notes_path,
+    })
 }
 
 fn build_dmg(skip_notarize: bool) -> Result<()> {
     let version = get_version()?;
-    let dmg_name = format!("ClaudeSleepPreventer-{}.dmg", version);
+    let dmg_name = format!("AgentsSleepPreventer-{}.dmg", version);
     let sparkle_root = ensure_sparkle()?;
     let sparkle_framework_slice = sparkle_root.join("Sparkle.xcframework/macos-arm64_x86_64");
     let sparkle_framework = sparkle_framework_slice.join("Sparkle.framework");
 
-    println!("=== Building Claude Sleep Preventer v{} DMG ===\n", version);
+    println!("=== Building Agents Sleep Preventer v{} DMG ===\n", version);
 
     // Step 1: Build release
     println!("[1/10] Building release...");
@@ -447,7 +482,7 @@ fn build_dmg(skip_notarize: bool) -> Result<()> {
             "-Xlinker",
             "@executable_path/../Frameworks",
             "-o",
-            "target/release/ClaudeSleepPreventer",
+            "target/release/AgentsSleepPreventer",
         ],
     )?;
 
@@ -475,7 +510,7 @@ fn build_dmg(skip_notarize: bool) -> Result<()> {
     // Step 5: Create app bundle
     println!("[5/10] Creating app bundle...");
     let bundle_dir = Path::new("target/release/bundle");
-    let app_dir = bundle_dir.join("ClaudeSleepPreventer.app");
+    let app_dir = bundle_dir.join("AgentsSleepPreventer.app");
     let contents_dir = app_dir.join("Contents");
     let macos_dir = contents_dir.join("MacOS");
     let frameworks_dir = contents_dir.join("Frameworks");
@@ -491,14 +526,11 @@ fn build_dmg(skip_notarize: bool) -> Result<()> {
 
     // Copy main app binary (Swift)
     fs::copy(
-        "target/release/ClaudeSleepPreventer",
-        macos_dir.join("ClaudeSleepPreventer"),
+        "target/release/AgentsSleepPreventer",
+        macos_dir.join("AgentsSleepPreventer"),
     )?;
     // Copy Rust CLI binary
-    fs::copy(
-        "target/release/claude-sleep-preventer",
-        macos_dir.join("claude-sleep-preventer"),
-    )?;
+    fs::copy("target/release/asp", macos_dir.join("asp"))?;
     fs::copy("Info.plist", contents_dir.join("Info.plist"))?;
     fs::copy("AppIcon.icns", resources_dir.join("AppIcon.icns"))?;
     copy_with_ditto(
@@ -515,7 +547,7 @@ fn build_dmg(skip_notarize: bool) -> Result<()> {
 
     // Step 6: Sign bundled binaries and Sparkle before the app bundle itself
     println!("[6/10] Signing bundled binaries...");
-    codesign_runtime(&macos_dir.join("claude-sleep-preventer"))?;
+    codesign_runtime(&macos_dir.join("asp"))?;
     codesign_runtime(&resources_dir.join("globe-listener"))?;
     codesign_runtime(&resources_dir.join("whisper-cli"))?;
     let sparkle_bundle = frameworks_dir.join("Sparkle.framework");
@@ -538,7 +570,7 @@ fn build_dmg(skip_notarize: bool) -> Result<()> {
     fs::create_dir_all(staging_dir)?;
 
     // Copy app to staging preserving Sparkle framework symlinks and code signatures
-    copy_with_ditto(&app_dir, &staging_dir.join("ClaudeSleepPreventer.app"))?;
+    copy_with_ditto(&app_dir, &staging_dir.join("AgentsSleepPreventer.app"))?;
 
     // Create Applications symlink - THIS IS THE KEY PART
     #[cfg(unix)]
@@ -554,7 +586,7 @@ fn build_dmg(skip_notarize: bool) -> Result<()> {
         &[
             "create",
             "-volname",
-            "Claude Sleep Preventer",
+            "Agents Sleep Preventer",
             "-srcfolder",
             staging_dir.to_str().unwrap(),
             "-ov",
@@ -595,8 +627,126 @@ fn build_dmg(skip_notarize: bool) -> Result<()> {
     Ok(())
 }
 
+fn hook_value_contains_owned_command(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::String(text) => OWNED_HOOK_MARKERS
+            .iter()
+            .any(|marker| text.contains(marker)),
+        serde_json::Value::Array(values) => values.iter().any(hook_value_contains_owned_command),
+        serde_json::Value::Object(map) => map.values().any(hook_value_contains_owned_command),
+        _ => false,
+    }
+}
+
+fn remove_owned_hooks_from_group(group: &mut serde_json::Value) -> bool {
+    let Some(hooks) = group
+        .get_mut("hooks")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return false;
+    };
+
+    let before = hooks.len();
+    hooks.retain(|hook| !hook_value_contains_owned_command(hook));
+    before != hooks.len()
+}
+
+fn remove_owned_hook_groups(hooks: &mut serde_json::Value) -> bool {
+    let Some(events) = hooks.as_object_mut() else {
+        return false;
+    };
+
+    let mut changed = false;
+    for groups in events.values_mut() {
+        let Some(groups) = groups.as_array_mut() else {
+            continue;
+        };
+
+        for group in groups.iter_mut() {
+            if remove_owned_hooks_from_group(group) {
+                changed = true;
+            }
+        }
+
+        let before = groups.len();
+        groups.retain(|group| {
+            group
+                .get("hooks")
+                .and_then(serde_json::Value::as_array)
+                .map(|hooks| !hooks.is_empty())
+                .unwrap_or(true)
+        });
+        changed |= before != groups.len();
+    }
+
+    changed
+}
+
+fn prune_empty_hook_events(hooks: &mut serde_json::Value) {
+    if let Some(events) = hooks.as_object_mut() {
+        events.retain(|_, groups| {
+            groups
+                .as_array()
+                .map(|groups| !groups.is_empty())
+                .unwrap_or(true)
+        });
+    }
+}
+
+fn clean_codex_hooks(home: &Path) -> Result<()> {
+    let hooks_file = home.join(".codex/hooks.json");
+    if !hooks_file.exists() {
+        return Ok(());
+    }
+
+    let content = fs::read_to_string(&hooks_file)
+        .with_context(|| format!("Failed to read {}", hooks_file.display()))?;
+    let Ok(mut hooks_json) = serde_json::from_str::<serde_json::Value>(&content) else {
+        println!(
+            "  Could not parse {}, leaving it unchanged",
+            hooks_file.display()
+        );
+        return Ok(());
+    };
+
+    let changed = hooks_json
+        .get_mut("hooks")
+        .map(remove_owned_hook_groups)
+        .unwrap_or(false);
+    if !changed {
+        return Ok(());
+    }
+
+    if let Some(hooks) = hooks_json.get_mut("hooks") {
+        prune_empty_hook_events(hooks);
+    }
+
+    if let Some(root) = hooks_json.as_object_mut() {
+        let hooks_empty = root
+            .get("hooks")
+            .and_then(serde_json::Value::as_object)
+            .map(|hooks| hooks.is_empty())
+            .unwrap_or(false);
+        if hooks_empty {
+            root.remove("hooks");
+        }
+        if root.is_empty() {
+            fs::remove_file(&hooks_file)
+                .with_context(|| format!("Failed to remove {}", hooks_file.display()))?;
+            println!("  Removed {}", hooks_file.display());
+            return Ok(());
+        }
+    }
+
+    fs::write(&hooks_file, serde_json::to_string_pretty(&hooks_json)?)
+        .with_context(|| format!("Failed to write {}", hooks_file.display()))?;
+    println!("  Removed ASP Codex hooks from {}", hooks_file.display());
+
+    Ok(())
+}
+
 fn clean(keep_model: bool) -> Result<()> {
-    println!("=== Claude Sleep Preventer Cleanup ===\n");
+    println!("=== Agents Sleep Preventer Cleanup ===\n");
     if keep_model {
         println!("(Keeping Whisper models)\n");
     }
@@ -604,7 +754,14 @@ fn clean(keep_model: bool) -> Result<()> {
     // Kill running processes
     println!("Killing running processes...");
     let _ = Command::new("pkill")
+        .args(["-f", "/AgentsSleepPreventer.app/Contents/MacOS/asp"])
+        .status();
+    let _ = Command::new("pkill").args(["-x", "asp"]).status();
+    let _ = Command::new("pkill")
         .args(["-f", "claude-sleep-preventer"])
+        .status();
+    let _ = Command::new("pkill")
+        .args(["-f", "AgentsSleepPreventer"])
         .status();
     let _ = Command::new("pkill")
         .args(["-f", "ClaudeSleepPreventer"])
@@ -612,37 +769,52 @@ fn clean(keep_model: bool) -> Result<()> {
 
     // Remove app from Applications
     println!("Removing app...");
+    let _ = fs::remove_dir_all("/Applications/AgentsSleepPreventer.app");
     let _ = fs::remove_dir_all("/Applications/ClaudeSleepPreventer.app");
 
     // Remove app data
     println!("Removing app data...");
     if let Some(home) = dirs::home_dir() {
         clean_app_support_dir(
+            &home.join("Library/Application Support/AgentsSleepPreventer"),
+            keep_model,
+        )?;
+        clean_app_support_dir(
             &home.join("Library/Application Support/ClaudeSleepPreventer"),
             keep_model,
         )?;
+        clean_app_support_dir(&home.join(".local/share/AgentsSleepPreventer"), keep_model)?;
         clean_app_support_dir(&home.join(".local/share/ClaudeSleepPreventer"), keep_model)?;
 
+        let _ = fs::remove_dir_all(home.join("Library/Logs/AgentsSleepPreventer"));
         let _ = fs::remove_dir_all(home.join("Library/Logs/ClaudeSleepPreventer"));
+        let _ = fs::remove_dir_all(home.join("Library/Caches/AgentsSleepPreventer"));
         let _ = fs::remove_dir_all(home.join("Library/Caches/ClaudeSleepPreventer"));
+        let _ = fs::remove_file(
+            home.join("Library/Preferences/com.charlontank.agents-sleep-preventer.plist"),
+        );
         let _ = fs::remove_file(
             home.join("Library/Preferences/com.charlontank.claude-sleep-preventer.plist"),
         );
 
         // Remove LaunchAgents
         println!("Removing LaunchAgents...");
-        let launch_agent =
-            home.join("Library/LaunchAgents/com.charlontank.claude-sleep-preventer.plist");
-        if launch_agent.exists() {
-            let uid = run_output("id", &["-u"])?;
-            let _ = Command::new("launchctl")
-                .args([
-                    "bootout",
-                    &format!("gui/{}", uid.trim()),
-                    launch_agent.to_str().unwrap(),
-                ])
-                .status();
-            let _ = fs::remove_file(&launch_agent);
+        let uid = run_output("id", &["-u"])?;
+        for label in [
+            "com.charlontank.agents-sleep-preventer.plist",
+            "com.charlontank.claude-sleep-preventer.plist",
+        ] {
+            let launch_agent = home.join("Library/LaunchAgents").join(label);
+            if launch_agent.exists() {
+                let _ = Command::new("launchctl")
+                    .args([
+                        "bootout",
+                        &format!("gui/{}", uid.trim()),
+                        launch_agent.to_str().unwrap(),
+                    ])
+                    .status();
+                let _ = fs::remove_file(&launch_agent);
+            }
         }
 
         // Remove Claude Code hooks (may be owned by root from old installations)
@@ -677,13 +849,24 @@ fn clean(keep_model: bool) -> Result<()> {
                 }
             }
         }
+
+        println!("Removing Codex hooks...");
+        clean_codex_hooks(&home)?;
     }
+
+    let _ = fs::remove_dir_all("/tmp/agents_working_pids");
+    let _ = fs::remove_dir_all("/tmp/claude_working_pids");
 
     // Remove sudoers config
     println!("Removing sudoers config...");
-    let _ = Command::new("sudo")
-        .args(["rm", "-f", "/etc/sudoers.d/claude-pmset"])
-        .status();
+    for sudoers_path in ["/etc/sudoers.d/agents-pmset", "/etc/sudoers.d/claude-pmset"] {
+        let _ = Command::new("sudo")
+            .args(["rm", "-f", sudoers_path])
+            .status();
+    }
+    let _ = fs::remove_file("/usr/local/bin/asp");
+    let _ = fs::remove_file("/usr/local/bin/agents-sleep-preventer");
+    let _ = fs::remove_file("/usr/local/bin/claude-sleep-preventer");
 
     // Remove whisper-cli and models (Homebrew + local build)
     if keep_model {
@@ -700,13 +883,14 @@ fn clean(keep_model: bool) -> Result<()> {
     // Reset TCC permissions
     println!("Resetting TCC permissions...");
     for permission in ["Microphone", "Accessibility", "ListenEvent"] {
-        let _ = Command::new("tccutil")
-            .args([
-                "reset",
-                permission,
-                "com.charlontank.claude-sleep-preventer",
-            ])
-            .status();
+        for bundle_id in [
+            "com.charlontank.agents-sleep-preventer",
+            "com.charlontank.claude-sleep-preventer",
+        ] {
+            let _ = Command::new("tccutil")
+                .args(["reset", permission, bundle_id])
+                .status();
+        }
     }
 
     // Re-enable sleep
@@ -717,6 +901,11 @@ fn clean(keep_model: bool) -> Result<()> {
 
     // Unmount any DMG
     println!("Unmounting DMG...");
+    if Path::new("/Volumes/Agents Sleep Preventer").exists() {
+        let _ = Command::new("hdiutil")
+            .args(["detach", "/Volumes/Agents Sleep Preventer"])
+            .status();
+    }
     if Path::new("/Volumes/Claude Sleep Preventer").exists() {
         let _ = Command::new("hdiutil")
             .args(["detach", "/Volumes/Claude Sleep Preventer"])
@@ -757,9 +946,9 @@ fn clean_app_support_dir(dir: &Path, keep_model: bool) -> Result<()> {
 }
 
 fn replace_app(open_app: bool) -> Result<()> {
-    let app_dir = Path::new("/Applications/ClaudeSleepPreventer.app");
+    let app_dir = Path::new("/Applications/AgentsSleepPreventer.app");
     if !app_dir.exists() {
-        bail!("Missing /Applications/ClaudeSleepPreventer.app");
+        bail!("Missing /Applications/AgentsSleepPreventer.app");
     }
     let sparkle_root = ensure_sparkle()?;
     let sparkle_framework_slice = sparkle_root.join("Sparkle.xcframework/macos-arm64_x86_64");
@@ -783,7 +972,7 @@ fn replace_app(open_app: bool) -> Result<()> {
             "-Xlinker",
             "@executable_path/../Frameworks",
             "-o",
-            "target/release/ClaudeSleepPreventer",
+            "target/release/AgentsSleepPreventer",
         ],
     )?;
     run(
@@ -796,13 +985,13 @@ fn replace_app(open_app: bool) -> Result<()> {
         ],
     )?;
 
-    let bin_path = app_dir.join("Contents/MacOS/claude-sleep-preventer");
-    let menubar_path = app_dir.join("Contents/MacOS/ClaudeSleepPreventer");
+    let bin_path = app_dir.join("Contents/MacOS/asp");
+    let menubar_path = app_dir.join("Contents/MacOS/AgentsSleepPreventer");
     let plist_path = app_dir.join("Contents/Info.plist");
     let resources_dir = app_dir.join("Contents/Resources");
     let frameworks_dir = app_dir.join("Contents/Frameworks");
-    fs::copy("target/release/claude-sleep-preventer", &bin_path)?;
-    fs::copy("target/release/ClaudeSleepPreventer", &menubar_path)?;
+    fs::copy("target/release/asp", &bin_path)?;
+    fs::copy("target/release/AgentsSleepPreventer", &menubar_path)?;
     fs::create_dir_all(&resources_dir)?;
     fs::create_dir_all(&frameworks_dir)?;
     fs::copy(
@@ -835,28 +1024,258 @@ fn replace_app(open_app: bool) -> Result<()> {
     Ok(())
 }
 
-fn release(version: &str, skip_notarize: bool, upload: bool) -> Result<()> {
-    println!("=== Release {} ===\n", version);
+fn verify_appcast_file(version: &str, appcast_path: &Path) -> Result<()> {
+    let content = fs::read_to_string(appcast_path)
+        .with_context(|| format!("Failed to read {}", appcast_path.display()))?;
+    let dmg_name = format!("AgentsSleepPreventer-{}.dmg", version);
+    let required = [
+        version.to_string(),
+        dmg_name,
+        release_asset_base_url(version),
+        github_repo_url(),
+        "sparkle:edSignature".to_string(),
+    ];
 
-    bump_version(version)?;
-    ensure_whisper_cli()?;
-    build_dmg(skip_notarize)?;
-    let appcast_path = generate_appcast(version)?;
+    for needle in required {
+        if !content.contains(&needle) {
+            bail!(
+                "Generated appcast {} does not contain required value: {}",
+                appcast_path.display(),
+                needle
+            );
+        }
+    }
 
-    if upload {
-        let dmg_name = format!("ClaudeSleepPreventer-{}.dmg", version);
-        let tag = format!("v{}", version);
+    Ok(())
+}
+
+fn release_exists(tag: &str) -> Result<bool> {
+    let status = Command::new("gh")
+        .args(["release", "view", tag, "--repo", GITHUB_REPO])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()?;
+    Ok(status.success())
+}
+
+fn ensure_release_upload_ready(version: &str) -> Result<String> {
+    let current = get_version()?;
+    if current != version {
+        bail!(
+            "Version is still {}. Run `cargo xtask release {}` first, commit and push the version bump, then rerun `cargo xtask release {} --upload`.",
+            current,
+            version,
+            version
+        );
+    }
+
+    let tracked_status = run_output("git", &["status", "--porcelain", "--untracked-files=no"])?;
+    if !tracked_status.trim().is_empty() {
+        bail!(
+            "Tracked files have uncommitted changes. Commit and push the release state before using --upload."
+        );
+    }
+
+    let branch = run_output("git", &["branch", "--show-current"])?;
+    let branch = branch.trim();
+    if branch.is_empty() {
+        bail!("Could not determine current git branch for release upload");
+    }
+
+    run("git", &["fetch", "origin", branch])?;
+
+    let head = run_output("git", &["rev-parse", "HEAD"])?;
+    let remote_ref = format!("origin/{}", branch);
+    let remote_head = run_output("git", &["rev-parse", &remote_ref])?;
+    let head = head.trim().to_string();
+    if head != remote_head.trim() {
+        bail!(
+            "Current HEAD is not pushed to origin/{}. Push the release commit before using --upload.",
+            branch
+        );
+    }
+
+    Ok(head)
+}
+
+fn ensure_github_release(version: &str, release_notes_path: &Path, target: &str) -> Result<()> {
+    let tag = format!("v{}", version);
+    let title = release_title(version);
+    let notes = release_notes_path
+        .to_str()
+        .context("Invalid release notes path")?;
+
+    if release_exists(&tag)? {
         run(
             "gh",
             &[
                 "release",
-                "upload",
+                "edit",
                 &tag,
-                &dmg_name,
-                appcast_path.to_str().unwrap(),
-                "--clobber",
+                "--repo",
+                GITHUB_REPO,
+                "--title",
+                &title,
+                "--notes-file",
+                notes,
+                "--latest",
             ],
         )?;
+    } else {
+        run(
+            "gh",
+            &[
+                "release",
+                "create",
+                &tag,
+                "--repo",
+                GITHUB_REPO,
+                "--title",
+                &title,
+                "--notes-file",
+                notes,
+                "--target",
+                target,
+                "--latest",
+            ],
+        )?;
+    }
+
+    Ok(())
+}
+
+fn upload_release_assets(version: &str, appcast_path: &Path) -> Result<()> {
+    let tag = format!("v{}", version);
+    let dmg_name = format!("AgentsSleepPreventer-{}.dmg", version);
+    run(
+        "gh",
+        &[
+            "release",
+            "upload",
+            &tag,
+            "--repo",
+            GITHUB_REPO,
+            &dmg_name,
+            appcast_path.to_str().context("Invalid appcast path")?,
+            "--clobber",
+        ],
+    )
+}
+
+fn verify_uploaded_release(version: &str) -> Result<()> {
+    let tag = format!("v{}", version);
+    let dmg_name = format!("AgentsSleepPreventer-{}.dmg", version);
+    let release_json = run_output(
+        "gh",
+        &[
+            "release",
+            "view",
+            &tag,
+            "--repo",
+            GITHUB_REPO,
+            "--json",
+            "assets,url",
+        ],
+    )?;
+    let release: serde_json::Value = serde_json::from_str(&release_json)?;
+    let assets = release
+        .get("assets")
+        .and_then(serde_json::Value::as_array)
+        .context("GitHub release response did not include assets")?;
+
+    for required_asset in [&dmg_name, SPARKLE_APPCAST_ASSET_NAME] {
+        let found = assets.iter().any(|asset| {
+            asset
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .map(|name| name == required_asset)
+                .unwrap_or(false)
+        });
+        if !found {
+            bail!(
+                "GitHub release {} is missing required asset {}",
+                tag,
+                required_asset
+            );
+        }
+    }
+
+    let latest_tag = run_output(
+        "gh",
+        &[
+            "release",
+            "view",
+            "--repo",
+            GITHUB_REPO,
+            "--json",
+            "tagName",
+            "--jq",
+            ".tagName",
+        ],
+    )?;
+    if latest_tag.trim() != tag {
+        bail!(
+            "GitHub latest release is {}, expected {}",
+            latest_tag.trim(),
+            tag
+        );
+    }
+
+    verify_latest_appcast(version)
+}
+
+fn verify_latest_appcast(version: &str) -> Result<()> {
+    let dmg_name = format!("AgentsSleepPreventer-{}.dmg", version);
+    let url = latest_appcast_url();
+
+    for attempt in 1..=5 {
+        let output = Command::new("curl").args(["-fsSL", &url]).output()?;
+        if output.status.success() {
+            let content = String::from_utf8_lossy(&output.stdout);
+            if content.contains(version)
+                && content.contains(&dmg_name)
+                && content.contains("sparkle:edSignature")
+            {
+                return Ok(());
+            }
+        }
+
+        if attempt < 5 {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        }
+    }
+
+    bail!(
+        "Latest Sparkle appcast at {} did not expose version {} with {}",
+        url,
+        version,
+        dmg_name
+    )
+}
+
+fn publish_release(version: &str, artifacts: &AppcastArtifacts, target: &str) -> Result<()> {
+    ensure_github_release(version, &artifacts.release_notes_path, target)?;
+    upload_release_assets(version, &artifacts.appcast_path)?;
+    verify_uploaded_release(version)?;
+    Ok(())
+}
+
+fn release(version: &str, skip_notarize: bool, upload: bool) -> Result<()> {
+    println!("=== Release {} ===\n", version);
+
+    let upload_target = if upload {
+        Some(ensure_release_upload_ready(version)?)
+    } else {
+        None
+    };
+
+    bump_version(version)?;
+    ensure_whisper_cli()?;
+    build_dmg(skip_notarize)?;
+    let appcast_artifacts = generate_appcast(version)?;
+
+    if let Some(target) = upload_target {
+        publish_release(version, &appcast_artifacts, &target)?;
     }
 
     println!("Release artifacts ready for {}", version);
@@ -871,6 +1290,7 @@ fn bump_version(version: &str) -> Result<()> {
     }
 
     replace_version_in_file("Cargo.toml", &current, version)?;
+    replace_version_in_file("Cargo.lock", &current, version)?;
     replace_version_in_file("Info.plist", &current, version)?;
     replace_version_in_file("README.md", &current, version)?;
     replace_version_in_file("distribution.xml", &current, version)?;

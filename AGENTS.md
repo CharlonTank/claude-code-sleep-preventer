@@ -37,6 +37,7 @@ This removes:
 - App data, logs, caches (optionally keeping models)
 - LaunchAgents
 - Claude Code hooks
+- ASP-owned Codex hooks from `~/.codex/hooks.json`
 - Sudoers config
 - TCC permissions (Input Monitoring, Microphone, Accessibility)
 - Whisper CLI + models (Homebrew paths and /tmp build), unless `--keep-model`
@@ -47,25 +48,30 @@ This removes:
 - `cargo xtask complete-test --skip-notarize --keep-model` (same but keeps models + whisper-cli)
 - `cargo xtask build-dmg --skip-notarize` (local DMG build only)
 - `cargo xtask replace-app --open` (rebuild + replace /Applications app)
-- `cargo xtask release X.Y.Z --upload` (bump, build DMG, notarize, upload)
+- `cargo xtask release X.Y.Z` (bump, build DMG, notarize, generate signed appcast)
+- `cargo xtask release X.Y.Z --upload` (only after committing/pushing the version bump; creates/updates GitHub release, marks it latest, uploads DMG + appcast, verifies Sparkle feed)
 
 ## Uninstall
 
-- `claude-sleep-preventer uninstall` removes app data by default; use `-k`/`--keep-model` to preserve Whisper models (~500 MB).
+- `asp uninstall` removes app data by default; use `-k`/`--keep-model` to preserve Whisper models (~500 MB).
+- `asp install` configures Claude Code hooks in `~/.claude/settings.json` and Codex hooks in `~/.codex/hooks.json`; it also enables `codex_hooks = true` in `~/.codex/config.toml`.
 
 ## Release Process
 
-To publish a new version, prefer:
+To publish a new version:
 
-1. `cargo xtask release X.Y.Z` (bumps `Cargo.toml`, `Info.plist`, `README.md`, builds signed DMG, notarizes)
-2. Add `--upload` to also push the DMG and `appcast.xml` to GitHub release
-3. Commit and push changes
+1. `cargo xtask release X.Y.Z` (bumps `Cargo.toml`, `Cargo.lock`, `Info.plist`, `README.md`, package distribution XML, builds signed DMG, notarizes, generates signed appcast)
+2. Review the generated app locally.
+3. Commit and push the version bump/release changes.
+4. `cargo xtask release X.Y.Z --upload` (requires a clean pushed HEAD; creates or updates `vX.Y.Z`, marks it latest, uploads the DMG and `appcast.xml`, verifies the release assets and latest Sparkle feed)
 
 **IMPORTANT**: The keychain profile is `"notary"` (NOT "notarytool").
 
 **IMPORTANT**: Update the version number in README.md download links when releasing a new version.
 
-**IMPORTANT**: The menu bar app uses Sparkle with `https://github.com/CharlonTank/claude-code-sleep-preventer/releases/latest/download/appcast.xml` as the feed URL. Keep semver tags in the `vX.Y.Z` format and publish both the DMG and `appcast.xml` asset on every release.
+**IMPORTANT**: The menu bar app uses Sparkle with `https://github.com/CharlonTank/agents-sleep-preventer/releases/latest/download/appcast.xml` as the feed URL. Keep semver tags in the `vX.Y.Z` format and publish both the DMG and `appcast.xml` asset on every release.
+
+**IMPORTANT**: Sparkle appcast signing prefers the keychain account `"CharlonTank-agents-sleep-preventer"` and falls back to the legacy `"CharlonTank-claude-sleep-preventer"` account while migrating existing developer machines.
 
 ## macOS Permissions Notes
 

@@ -394,8 +394,8 @@ fn borderless_window_class() -> &'static Class {
     static CLASS: OnceLock<WindowClassPtr> = OnceLock::new();
     let class_ptr = CLASS.get_or_init(|| {
         let superclass = class!(NSWindow);
-        let mut decl = ClassDecl::new("CCSPBorderlessWindow", superclass)
-            .expect("Failed to create CCSPBorderlessWindow class");
+        let mut decl = ClassDecl::new("ASPBorderlessWindow", superclass)
+            .expect("Failed to create ASPBorderlessWindow class");
         unsafe {
             decl.add_method(
                 sel!(canBecomeKeyWindow),
@@ -416,8 +416,8 @@ fn setup_target_class() -> &'static Class {
     static CLASS: OnceLock<ClassPtr> = OnceLock::new();
     let class_ptr = CLASS.get_or_init(|| {
         let superclass = class!(NSObject);
-        let mut decl = ClassDecl::new("CCSPSetupTarget", superclass)
-            .expect("Failed to create CCSPSetupTarget class");
+        let mut decl = ClassDecl::new("ASPSetupTarget", superclass)
+            .expect("Failed to create ASPSetupTarget class");
         decl.add_ivar::<*mut c_void>("rustState");
         unsafe {
             decl.add_method(
@@ -435,8 +435,8 @@ fn permissions_target_class() -> &'static Class {
     static CLASS: OnceLock<ClassPtr> = OnceLock::new();
     let class_ptr = CLASS.get_or_init(|| {
         let superclass = class!(NSObject);
-        let mut decl = ClassDecl::new("CCSPPermissionsTarget", superclass)
-            .expect("Failed to create CCSPPermissionsTarget class");
+        let mut decl = ClassDecl::new("ASPPermissionsTarget", superclass)
+            .expect("Failed to create ASPPermissionsTarget class");
         decl.add_ivar::<*mut c_void>("rustState");
         unsafe {
             decl.add_method(

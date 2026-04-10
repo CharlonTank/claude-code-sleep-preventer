@@ -34,8 +34,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var hotKeyHandler: EventHandlerRef?
     private var hotKeyActive: EventHotKeyRef?
     private var hotKeyInactive: EventHotKeyRef?
-    private let hotKeySignature: OSType = 0x63637370 // 'ccsp'
-    private let hotKeyQueue = DispatchQueue(label: "ccsp.hotkeys")
+    private let hotKeySignature: OSType = 0x61737021 // 'asp!'
+    private let hotKeyQueue = DispatchQueue(label: "asp.hotkeys")
     private var activeIndex = 0
     private var inactiveIndex = 0
     private let statusRefreshInterval: TimeInterval = 2.0
@@ -82,13 +82,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func openLogs() {
         let logDir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Logs/ClaudeSleepPreventer")
+            .appendingPathComponent("Library/Logs/AgentsSleepPreventer")
         NSWorkspace.shared.open(logDir)
     }
 
     @objc private func openSettings() {
         let cliPath = Bundle.main.bundleURL
-            .appendingPathComponent("Contents/MacOS/claude-sleep-preventer")
+            .appendingPathComponent("Contents/MacOS/asp")
 
         DispatchQueue.global(qos: .userInitiated).async {
             let process = Process()
@@ -115,7 +115,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func startAgent() {
         guard agentProcess == nil else { return }
         let agentURL = Bundle.main.bundleURL
-            .appendingPathComponent("Contents/MacOS/claude-sleep-preventer")
+            .appendingPathComponent("Contents/MacOS/asp")
 
         let process = Process()
         process.executableURL = agentURL
@@ -127,7 +127,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             try process.run()
             agentProcess = process
         } catch {
-            NSLog("Failed to start ccsp-agent: \(error)")
+            NSLog("Failed to start asp agent: \(error)")
         }
     }
 
@@ -190,7 +190,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func fetchInstanceList() -> InstanceList {
         let agentURL = Bundle.main.bundleURL
-            .appendingPathComponent("Contents/MacOS/claude-sleep-preventer")
+            .appendingPathComponent("Contents/MacOS/asp")
 
         let process = Process()
         process.executableURL = agentURL
@@ -291,10 +291,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         menu.addItem(NSMenuItem.separator())
 
-        menu.addItem(disabledItem("Claude Hooks"))
+        menu.addItem(disabledItem("Agent Hooks"))
         let hooksStatus = list.hooksInstalled ? "  Installed" : "  Not installed"
         menu.addItem(disabledItem(hooksStatus))
-        let hooksTitle = list.hooksInstalled ? "Reinstall Claude Hooks..." : "Install Claude Hooks..."
+        let hooksTitle = list.hooksInstalled ? "Reinstall Agent Hooks..." : "Install Agent Hooks..."
         let hooksItem = NSMenuItem(title: hooksTitle, action: #selector(installHooksAction), keyEquivalent: "i")
         hooksItem.target = self
         menu.addItem(hooksItem)
@@ -453,7 +453,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         let agentURL = Bundle.main.bundleURL
-            .appendingPathComponent("Contents/MacOS/claude-sleep-preventer")
+            .appendingPathComponent("Contents/MacOS/asp")
 
         DispatchQueue.global(qos: .userInitiated).async {
             let process = Process()
@@ -477,9 +477,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func isHooksInstalled() -> Bool {
-        let hooksPath = FileManager.default.homeDirectoryForCurrentUser
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let claudeHooksPath = home
             .appendingPathComponent(".claude/hooks/prevent-sleep.sh")
-        return FileManager.default.fileExists(atPath: hooksPath.path)
+        let hasClaudeHooks = FileManager.default.fileExists(atPath: claudeHooksPath.path)
+
+        let codexHooksPath = home.appendingPathComponent(".codex/hooks.json")
+        guard
+            let hooksData = try? Data(contentsOf: codexHooksPath),
+            let hooksText = String(data: hooksData, encoding: .utf8)
+        else {
+            return false
+        }
+
+        let hasCodexHooks = hooksText.contains("AgentsSleepPreventer.app/Contents/MacOS/asp")
+            || hooksText.contains("/usr/local/bin/asp")
+            || hooksText.contains("/usr/local/bin/agents-sleep-preventer")
+        return hasClaudeHooks && hasCodexHooks
     }
 
     private func promptInstallHooksIfNeeded() {
@@ -491,13 +505,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func showInstallDialog(canCancel: Bool = true) {
         let alert = NSAlert()
-        alert.messageText = "Install Claude Code Hooks"
+        alert.messageText = "Install Agent Hooks"
         alert.informativeText = """
-            This will configure Claude Code hooks to automatically prevent sleep while Claude is working.
+            This will configure Claude Code and Codex hooks to automatically prevent sleep while agents are working.
 
             The hooks will:
-            • Prevent system sleep when Claude starts a task
-            • Re-enable sleep when Claude finishes
+            • Prevent system sleep when an agent starts a task
+            • Re-enable sleep when the agent finishes
 
             Administrator password required.
             """
@@ -529,7 +543,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         _ = debug
 
         let cliPath = Bundle.main.bundleURL
-            .appendingPathComponent("Contents/MacOS/claude-sleep-preventer")
+            .appendingPathComponent("Contents/MacOS/asp")
             .path
         let realUser = NSUserName()
         let command = "SUDO_USER=\(realUser) \(cliPath) install -y"
@@ -575,7 +589,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func showInstallSuccess() {
         let alert = NSAlert()
         alert.messageText = "Setup complete"
-        alert.informativeText = "Restart Claude Code to activate sleep prevention."
+        alert.informativeText = "Restart Claude Code or Codex to activate sleep prevention."
         alert.addButton(withTitle: "OK")
         alert.runModal()
     }
@@ -596,7 +610,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func showUninstallDialog() {
         let alert = NSAlert()
-        alert.messageText = "Uninstall Claude Sleep Preventer"
+        alert.messageText = "Uninstall Agents Sleep Preventer"
         alert.informativeText = "Select what to remove:"
         alert.alertStyle = .warning
         alert.addButton(withTitle: "Uninstall")
@@ -604,7 +618,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let contentView = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: 100))
 
-        let hooksCheck = NSButton(checkboxWithTitle: "Remove Claude Code hooks", target: nil, action: nil)
+        let hooksCheck = NSButton(checkboxWithTitle: "Remove agent hooks", target: nil, action: nil)
         hooksCheck.state = .on
         hooksCheck.frame = NSRect(x: 0, y: 70, width: 300, height: 20)
 
@@ -649,7 +663,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         let cliPath = Bundle.main.bundleURL
-            .appendingPathComponent("Contents/MacOS/claude-sleep-preventer")
+            .appendingPathComponent("Contents/MacOS/asp")
             .path
         let realUser = NSUserName()
         let command = (["SUDO_USER=\(realUser)", cliPath] + args).joined(separator: " ")
@@ -695,7 +709,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func showUninstallSuccess() {
         let alert = NSAlert()
         alert.messageText = "Uninstall complete"
-        alert.informativeText = "Claude Sleep Preventer has been removed."
+        alert.informativeText = "Agents Sleep Preventer has been removed."
         alert.addButton(withTitle: "OK")
         alert.runModal()
     }
@@ -710,7 +724,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 }
 
 @main
-struct CCSPMenubarApp {
+struct ASPMenubarApp {
     static func main() {
         let app = NSApplication.shared
         let delegate = AppDelegate()

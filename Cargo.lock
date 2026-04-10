@@ -9,6 +9,31 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
+name = "agents-sleep-preventer"
+version = "4.0.0"
+dependencies = [
+ "anyhow",
+ "block",
+ "clap",
+ "core-foundation",
+ "core-graphics",
+ "cpal",
+ "dirs 5.0.1",
+ "dispatch",
+ "global-hotkey",
+ "hound",
+ "io-kit-sys",
+ "libc",
+ "mach2 0.6.0",
+ "objc",
+ "serde",
+ "serde_json",
+ "sysinfo",
+ "tao",
+ "tray-icon",
+]
+
+[[package]]
 name = "aho-corasick"
 version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -302,31 +327,6 @@ name = "clap_lex"
 version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a1d728cc89cf3aee9ff92b05e62b19ee65a02b5702cff7d5a377e32c6ae29d8d"
-
-[[package]]
-name = "claude-sleep-preventer"
-version = "3.0.3"
-dependencies = [
- "anyhow",
- "block",
- "clap",
- "core-foundation",
- "core-graphics",
- "cpal",
- "dirs 5.0.1",
- "dispatch",
- "global-hotkey",
- "hound",
- "io-kit-sys",
- "libc",
- "mach2 0.6.0",
- "objc",
- "serde",
- "serde_json",
- "sysinfo",
- "tao",
- "tray-icon",
-]
 
 [[package]]
 name = "cocoa"

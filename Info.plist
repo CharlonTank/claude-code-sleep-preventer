@@ -3,17 +3,17 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleExecutable</key>
-    <string>ClaudeSleepPreventer</string>
+    <string>AgentsSleepPreventer</string>
     <key>CFBundleIdentifier</key>
-    <string>com.charlontank.claude-sleep-preventer</string>
+    <string>com.charlontank.agents-sleep-preventer</string>
     <key>CFBundleName</key>
-    <string>Claude Sleep Preventer</string>
+    <string>Agents Sleep Preventer</string>
     <key>CFBundleDisplayName</key>
-    <string>Claude Sleep Preventer</string>
+    <string>Agents Sleep Preventer</string>
     <key>CFBundleVersion</key>
-    <string>3.0.3</string>
+    <string>4.0.0</string>
     <key>CFBundleShortVersionString</key>
-    <string>3.0.3</string>
+    <string>4.0.0</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleIconFile</key>
@@ -23,7 +23,7 @@
     <key>LSUIElement</key>
     <true/>
     <key>SUFeedURL</key>
-    <string>https://github.com/CharlonTank/claude-code-sleep-preventer/releases/latest/download/appcast.xml</string>
+    <string>https://github.com/CharlonTank/agents-sleep-preventer/releases/latest/download/appcast.xml</string>
     <key>SUPublicEDKey</key>
     <string>wJFwQ6AW9va82tJQ8QWvo2ezKV3jHhbfYgUsaM6ISCc=</string>
     <key>SUEnableAutomaticChecks</key>

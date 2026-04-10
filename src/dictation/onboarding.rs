@@ -19,7 +19,7 @@ use super::transcription::{DictationSetupStatus, WhisperTranscriber};
 
 /// Check if this is the first launch (no preferences file exists)
 fn is_first_launch() -> bool {
-    !get_prefs_path().exists()
+    !get_prefs_path().exists() && !get_legacy_prefs_path().exists()
 }
 
 /// Mark that onboarding has been completed
@@ -32,6 +32,13 @@ fn mark_onboarding_complete() {
 }
 
 fn get_prefs_path() -> PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join("AgentsSleepPreventer")
+        .join("preferences.txt")
+}
+
+fn get_legacy_prefs_path() -> PathBuf {
     dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("/tmp"))
         .join("ClaudeSleepPreventer")
@@ -47,7 +54,7 @@ pub fn run_onboarding_if_needed(auto_dismiss_final: bool) {
 
     logging::log("[onboarding] First launch detected, starting setup...");
 
-    let welcome_message = r#"La confidentialite est au coeur de Claude Sleep Preventer.
+    let welcome_message = r#"La confidentialite est au coeur d'Agents Sleep Preventer.
 Autorisez ces acces pour activer la dictee vocale."#;
 
     let window = PermissionsWindow::new("Configurons les permissions", welcome_message);
@@ -173,7 +180,7 @@ fn handle_permission_toggle(toggle: PermissionToggle) {
                 if !request_input_monitoring_permission() {
                     open_input_monitoring_settings();
                     native_dialogs::show_dialog(
-                        "Dans Reglages Systeme > Confidentialite et securite > Input Monitoring,\ncliquez sur le bouton + puis selectionnez ClaudeSleepPreventer.app dans /Applications, puis activez l'interrupteur.",
+                        "Dans Reglages Systeme > Confidentialite et securite > Input Monitoring,\ncliquez sur le bouton + puis selectionnez AgentsSleepPreventer.app dans /Applications, puis activez l'interrupteur.",
                         "Input Monitoring",
                     );
                 }

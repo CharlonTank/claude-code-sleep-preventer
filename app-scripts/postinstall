@@ -1,10 +1,11 @@
 #!/bin/bash
-APP_CLI="/Applications/ClaudeSleepPreventer.app/Contents/MacOS/claude-sleep-preventer"
+APP_CLI="/Applications/AgentsSleepPreventer.app/Contents/MacOS/asp"
 
 if [ -x "$APP_CLI" ]; then
     install -d /usr/local/bin
-    install -m 755 "$APP_CLI" /usr/local/bin/claude-sleep-preventer
+    install -m 755 "$APP_CLI" /usr/local/bin/asp
+    install -m 755 "$APP_CLI" /usr/local/bin/agents-sleep-preventer
 fi
 
-open -a 'ClaudeSleepPreventer'
+open /Applications/AgentsSleepPreventer.app
 exit 0

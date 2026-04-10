@@ -6,19 +6,19 @@ use std::time::SystemTime;
 
 static LOG_FILE: Mutex<Option<PathBuf>> = Mutex::new(None);
 
-/// Initialize logging to ~/Library/Logs/ClaudeSleepPreventer/ccsp.log
+/// Initialize logging to ~/Library/Logs/AgentsSleepPreventer/asp.log
 pub fn init() {
     let log_dir = dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join("Library/Logs/ClaudeSleepPreventer");
+        .join("Library/Logs/AgentsSleepPreventer");
 
     if fs::create_dir_all(&log_dir).is_ok() {
-        let log_path = log_dir.join("ccsp.log");
+        let log_path = log_dir.join("asp.log");
         *LOG_FILE.lock().unwrap() = Some(log_path.clone());
 
         // Write startup message
         log_internal(&format!(
-            "=== CCSP {} started ===",
+            "=== ASP {} started ===",
             env!("CARGO_PKG_VERSION")
         ));
         log_internal(&format!("Executable: {:?}", std::env::current_exe().ok()));

@@ -59,16 +59,28 @@ impl AppSettings {
     pub fn settings_path() -> PathBuf {
         dirs::data_local_dir()
             .unwrap_or_else(|| PathBuf::from("/tmp"))
+            .join("AgentsSleepPreventer")
+            .join("settings.json")
+    }
+
+    fn legacy_settings_path() -> PathBuf {
+        dirs::data_local_dir()
+            .unwrap_or_else(|| PathBuf::from("/tmp"))
             .join("ClaudeSleepPreventer")
             .join("settings.json")
     }
 
     /// Load settings from disk, returning defaults if file doesn't exist or is invalid
     pub fn load() -> Self {
-        let path = Self::settings_path();
-        if !path.exists() {
+        let primary_path = Self::settings_path();
+        let legacy_path = Self::legacy_settings_path();
+        let path = if primary_path.exists() {
+            primary_path
+        } else if legacy_path.exists() {
+            legacy_path
+        } else {
             return Self::default();
-        }
+        };
 
         match fs::read_to_string(&path) {
             Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
