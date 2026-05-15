@@ -54,7 +54,7 @@ This removes:
 ## Uninstall
 
 - `asp uninstall` removes app data by default; use `-k`/`--keep-model` to preserve Whisper models (~500 MB).
-- `asp install` configures Claude Code hooks in `~/.claude/settings.json` and Codex hooks in `~/.codex/hooks.json`; it also enables `codex_hooks = true` in `~/.codex/config.toml`.
+- `asp install` configures Claude Code hooks in `~/.claude/settings.json` and Codex hooks in `~/.codex/hooks.json`; it also enables `hooks = true` in `~/.codex/config.toml`.
 
 ## Release Process
 

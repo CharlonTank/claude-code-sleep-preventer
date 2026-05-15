@@ -123,7 +123,20 @@ fn complete_test(skip_notarize: bool, keep_model: bool) -> Result<()> {
 
 fn project_root() -> Result<PathBuf> {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    Ok(manifest_dir.parent().unwrap().to_path_buf())
+    for dir in manifest_dir.ancestors() {
+        let cargo_toml_path = dir.join("Cargo.toml");
+        let Ok(cargo_toml) = fs::read_to_string(&cargo_toml_path) else {
+            continue;
+        };
+        if cargo_toml.contains("name = \"agents-sleep-preventer\"") {
+            return Ok(dir.to_path_buf());
+        }
+    }
+
+    bail!(
+        "Could not locate agents-sleep-preventer Cargo.toml from {}",
+        manifest_dir.display()
+    )
 }
 
 fn get_version() -> Result<String> {

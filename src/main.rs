@@ -925,7 +925,16 @@ fn set_toml_feature_true(content: &str, feature: &str) -> String {
                 }
             }
         }
-        lines.insert(features_end, format!("{} = true", feature));
+        let mut insert_at = features_end;
+        while insert_at > start + 1
+            && lines
+                .get(insert_at - 1)
+                .map(|line| line.trim().is_empty())
+                .unwrap_or(false)
+        {
+            insert_at -= 1;
+        }
+        lines.insert(insert_at, format!("{} = true", feature));
     } else {
         if !lines.is_empty()
             && lines
@@ -942,9 +951,44 @@ fn set_toml_feature_true(content: &str, feature: &str) -> String {
     format!("{}\n", lines.join("\n"))
 }
 
+fn remove_toml_feature(content: &str, feature: &str) -> String {
+    let mut changed = false;
+    let mut in_features = false;
+    let mut lines = Vec::new();
+
+    for line in content.lines() {
+        if let Some(section) = toml_section_name(line) {
+            in_features = section == "features";
+        }
+
+        if in_features {
+            let code = line.split('#').next().unwrap_or("").trim_start();
+            if let Some(rest) = code.strip_prefix(feature) {
+                if rest.trim_start().starts_with('=') {
+                    changed = true;
+                    continue;
+                }
+            }
+        }
+
+        lines.push(line.to_string());
+    }
+
+    if changed {
+        format!("{}\n", lines.join("\n"))
+    } else {
+        content.to_string()
+    }
+}
+
+fn set_codex_hooks_feature(content: &str) -> String {
+    let without_legacy = remove_toml_feature(content, "codex_hooks");
+    set_toml_feature_true(&without_legacy, "hooks")
+}
+
 fn enable_codex_hooks_feature(config_file: &Path) -> Result<()> {
     let content = fs::read_to_string(config_file).unwrap_or_default();
-    let updated = set_toml_feature_true(&content, "codex_hooks");
+    let updated = set_codex_hooks_feature(&content);
     if updated != content {
         fs::write(config_file, updated)
             .with_context(|| format!("Failed to write {}", config_file.display()))?;
@@ -1120,6 +1164,50 @@ fn install_codex_hooks(home: &Path, app_binary: &str) -> Result<()> {
     println!("  Updated {}", hooks_file.display());
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn set_codex_hooks_feature_adds_current_flag() {
+        let updated = set_codex_hooks_feature("model = \"gpt-5.5\"\n");
+
+        assert_eq!(updated, "model = \"gpt-5.5\"\n\n[features]\nhooks = true\n");
+    }
+
+    #[test]
+    fn set_codex_hooks_feature_replaces_deprecated_flag() {
+        let config = "\
+model = \"gpt-5.5\"
+
+[features]
+unified_exec = true
+codex_hooks = true
+
+[plugins.github]
+enabled = true
+";
+
+        let updated = set_codex_hooks_feature(config);
+
+        assert!(!updated.contains("codex_hooks"));
+        assert!(updated.contains("[features]\nunified_exec = true\nhooks = true"));
+        assert!(updated.contains("[plugins.github]\nenabled = true"));
+    }
+
+    #[test]
+    fn set_codex_hooks_feature_updates_existing_hooks_flag() {
+        let config = "\
+[features]
+hooks = false
+";
+
+        let updated = set_codex_hooks_feature(config);
+
+        assert_eq!(updated, "[features]\nhooks = true\n");
+    }
 }
 
 fn remove_codex_hooks(home: &Path) -> Result<bool> {
