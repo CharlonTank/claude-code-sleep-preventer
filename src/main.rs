@@ -309,22 +309,33 @@ fn set_sleep_disabled(disabled: bool) -> Result<()> {
     Ok(())
 }
 
-fn menubar_sync_sleep() {
-    let manual_enabled = MANUAL_SLEEP_PREVENTION.load(Ordering::SeqCst);
+fn sleep_prevention_enabled_from_settings() -> bool {
+    settings::AppSettings::load().sleep_prevention.enabled
+}
+
+fn sync_sleep_state(source: &str, manual_enabled: bool) -> Result<()> {
     let active = count_active_pids();
     let sleep_disabled = is_sleep_disabled();
-    let should_prevent = manual_enabled && active > 0;
+    let thermal_warning = check_thermal_warning();
+    let should_prevent = manual_enabled && active > 0 && !thermal_warning;
 
     if should_prevent && !sleep_disabled {
-        let _ = set_sleep_disabled(true);
-        logging::log(&format!("[sync] Sleep disabled (active PIDs: {})", active));
+        set_sleep_disabled(true)?;
+        logging::log(&format!(
+            "[{}] Sleep disabled (active PIDs: {})",
+            source, active
+        ));
     } else if !should_prevent && sleep_disabled {
-        let _ = set_sleep_disabled(false);
-        logging::log("[sync] Sleep re-enabled");
-        if is_lid_closed() {
-            force_sleep_now();
-        }
+        enable_sleep_and_trigger_if_lid_closed()?;
+        logging::log(&format!("[{}] Sleep re-enabled", source));
     }
+
+    Ok(())
+}
+
+fn menubar_sync_sleep() {
+    let manual_enabled = MANUAL_SLEEP_PREVENTION.load(Ordering::SeqCst);
+    let _ = sync_sleep_state("sync", manual_enabled);
 }
 
 fn cleanup_stale_pids() {
@@ -456,6 +467,7 @@ fn format_process_location(pid: u32) -> String {
 }
 
 fn cmd_start() -> Result<()> {
+    logging::init_quiet();
     ensure_pids_dir()?;
 
     let agent_pid = find_agent_ancestor().unwrap_or(std::process::id());
@@ -463,16 +475,17 @@ fn cmd_start() -> Result<()> {
 
     fs::write(&pid_file, "working").context("Failed to write PID file")?;
 
-    Ok(())
+    sync_sleep_state("hook-start", sleep_prevention_enabled_from_settings())
 }
 
 fn cmd_stop() -> Result<()> {
+    logging::init_quiet();
     let agent_pid = find_agent_ancestor().unwrap_or(std::process::id());
     let pid_file = get_pid_file(agent_pid);
 
     let _ = fs::remove_file(&pid_file);
 
-    Ok(())
+    sync_sleep_state("hook-stop", sleep_prevention_enabled_from_settings())
 }
 
 fn get_all_agent_processes() -> Vec<ProcessInfo> {

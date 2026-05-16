@@ -8,6 +8,15 @@ static LOG_FILE: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 /// Initialize logging to ~/Library/Logs/AgentsSleepPreventer/asp.log
 pub fn init() {
+    init_with_startup_message(true);
+}
+
+/// Initialize logging without writing a startup line.
+pub fn init_quiet() {
+    init_with_startup_message(false);
+}
+
+fn init_with_startup_message(write_startup: bool) {
     let log_dir = dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("/tmp"))
         .join("Library/Logs/AgentsSleepPreventer");
@@ -16,12 +25,13 @@ pub fn init() {
         let log_path = log_dir.join("asp.log");
         *LOG_FILE.lock().unwrap() = Some(log_path.clone());
 
-        // Write startup message
-        log_internal(&format!(
-            "=== ASP {} started ===",
-            env!("CARGO_PKG_VERSION")
-        ));
-        log_internal(&format!("Executable: {:?}", std::env::current_exe().ok()));
+        if write_startup {
+            log_internal(&format!(
+                "=== ASP {} started ===",
+                env!("CARGO_PKG_VERSION")
+            ));
+            log_internal(&format!("Executable: {:?}", std::env::current_exe().ok()));
+        }
     }
 }
 
